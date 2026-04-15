@@ -141,3 +141,5 @@ examples/chicago/
 
 out_*.gif
 out_*.png
+
+artifacts/
