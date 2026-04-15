@@ -178,7 +178,4 @@ for idx, r in enumerate(results):
     ax.set_aspect("equal"); ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
-outpath = os.path.join(os.path.dirname(__file__), "..", "docs", "img", "duo_py_vs_jax.png")
-fig.savefig(outpath, dpi=150, bbox_inches="tight")
 plt.close()
-print(f"\nFigure saved to {outpath}")

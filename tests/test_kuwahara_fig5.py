@@ -165,7 +165,4 @@ ax.legend(); ax.grid(True, alpha=0.3)
 ax.set_xlim(0, 5); ax.set_ylim(0, max(cum_arr_d["1_4"]["2"][-1], 1) * 1.1)
 
 plt.tight_layout()
-outpath = os.path.join(os.path.dirname(__file__), "..", "docs", "img", "kuwahara_fig6_7_comparison.png")
-fig.savefig(outpath, dpi=150, bbox_inches="tight")
 plt.close()
-print(f"\nFigure saved to {outpath}")
