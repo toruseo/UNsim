@@ -3,6 +3,9 @@
 [![PyPi](https://img.shields.io/pypi/v/unsim.svg)](https://pypi.python.org/pypi/unsim)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.11380-b31b1b.svg)](https://doi.org/10.48550/arXiv.2604.11380)
 
+> [!IMPORTANT]
+>  **Still an early development stage.** There may be still bugs and inconsistency. The performance need to be optimized (especially the memory consumption). Documents will be added. The code and API will be significantly changed in the future.
+
 ## Main Features
 
 - Simple, lightweight, and easy-to-use Python implementation of modern standard models of dynamic network traffic flow for Python
@@ -10,9 +13,6 @@
 - The features and syntax are almost identical to [UXsim](https://github.com/toruseo/UXsim) traffic flow simulator
 - An end-to-end differentiable simulation using JAX
 - Lightning-fast JAX mode on a good GPU server: 0.3 sec forward simulation for Chicago-Sketch dataset (2500 links, 1 million vehicles, 3 hours), and 0.5 sec for backward differentiation
-- **Still an early development stage.** There may be still bugs and inconsistency. The performance need to be optimized (especially the memory consumption). Documents will be added. The code and API will be significantly changed in the future.
-
-- **Academic publication.** This is the official implementation of arXiv preprint ``[End-to-end differentiable network traffic simulation with dynamic route choice](https://doi.org/10.48550/arXiv.2604.11380)'' by Toru Seo.
 
 ## Simulation Examples
 
