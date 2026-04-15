@@ -5,23 +5,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unsim"
-description = "UNsim: traffic flow simulator"
+description = "UNsim: Differentiable network traffic simulation in Python"
 readme = "README.md"
 authors = [{name = "Toru Seo", email = "seo.t.aa@m.titech.ac.jp"}]
 license = "MIT"
 classifiers = [
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Scientific/Engineering",
 ]
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["numpy", "pandas", "matplotlib", "pillow", "pytest"] #jax must be installed by user as the optimal version depends on the hard/software env
 dynamic = ["version"]
 
 [project.urls]
