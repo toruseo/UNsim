@@ -9,17 +9,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
@@ -30,24 +27,20 @@ jobs:
           python -m pytest tests/ -v
 
       - name: DUO comparison report
-        if: matrix.python-version == '3.12'
         run: |
           python tests/test_duo_comparison.py
 
       - name: Upload DUO comparison figure
-        if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
         with:
           name: duo-py-vs-jax
           path: artifacts/duo_py_vs_jax.png
 
       - name: Kuwahara Fig.5 comparison
-        if: matrix.python-version == '3.12'
         run: |
           python tests/test_kuwahara_fig5.py
 
       - name: Upload Kuwahara comparison figure
-        if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
         with:
           name: kuwahara-fig6-7-comparison
