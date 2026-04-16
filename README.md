@@ -9,7 +9,6 @@
 ## Main Features
 
 - Simple, lightweight, and easy-to-use Python implementation of modern standard models of dynamic network traffic flow
-  - The internal traffic models are based on Link Transmission Model and Dynamic User Optimum route choice model
 - An end-to-end differentiable simulation using JAX
 - Lightning-fast JAX mode on a good GPU server: 0.3 sec for forward simulation on the Chicago-Sketch dataset (2500 links, 1 million vehicles, 3 hours), and 0.5 sec for backward differentiation
 - The features and syntax are almost identical to those of the [UXsim](https://github.com/toruseo/UXsim) traffic flow simulator
@@ -78,6 +77,16 @@ pip install unsim
 ```
 If you want to use JAX acceleration, install your preferred JAX build such as `jax[cpu]` and `jax[cuda13]`.
 The optimal installation depends on your hardware and software configuration, so please check the [JAX official document](https://docs.jax.dev/en/latest/installation.html).
+
+## Technical Note
+
+This simulator implements the following transportation scientific models:
+- [Link Transmission Model](https://www.mech.kuleuven.be/cib/verkeer/dwn/pub/P2007A.pdf): very efficient and accurate macroscopic traffic flow model
+- [Incremental Node Model](https://doi.org/10.1016/j.trb.2011.04.001): general intersection or junction model
+- [Dynamic User Optimum](https://doi.org/10.1016/S0191-2615(00)00005-9): route choice model in which each traveler chooses the real-time minimum travel time path
+
+For the details, please see [arXiv preprint](https://doi.org/10.48550/arXiv.2604.11380).
+
 ## Terms of Use & License
 
 UNsim is released under the MIT License. You are free to use it as long as the source is acknowledged.
