@@ -58,12 +58,16 @@ Simulation completed. merge
     Avg delay:       84.9 s
 ```
 
+<p float="left">
+  <img width="400" alt="network_t200" src="https://github.com/user-attachments/assets/cac09936-3672-4bd4-9922-df8d4c7aeacb" />
+  <img width="400" alt="network_t800" src="https://github.com/user-attachments/assets/cd702ac6-dfc3-4f34-b807-7b8148b7a9c9" />
+</p>
+
 ## Install
 
 ```bash
 pip install unsim
 ```
-
 If you want to use [JAX](https://docs.jax.dev/en/latest/) acceleration, install your preferred JAX build with a command such as `jax[cpu]` and `jax[cuda13]`.
 The optimal installation depends on your hardware and software configuration, so please check the details by yourself.
 
