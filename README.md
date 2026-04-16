@@ -26,20 +26,28 @@ Simple scenario in a Y-shaped merge network:
 from unsim import World
 import matplotlib.pyplot as plt
 
-W = World(name="merge", deltat=5, tmax=1200, print_mode=1, save_mode=1)
+# Define the main simulation
+# Units are standardized to seconds (s) and meters (m)
+W = World(name="merge", deltat=5, tmax=1200,    
+          print_mode=1, save_mode=1, show_mode=1)
 
+# Define the network
 W.addNode("orig1", x=0, y=0)
 W.addNode("orig2", x=0, y=2)
 W.addNode("merge", x=1, y=1)
 W.addNode("dest", x=2, y=1)
-W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20, jam_density=0.2, merge_priority=1)
-W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20, jam_density=0.2, merge_priority=1)
-W.addLink("link3", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20, capacity=0.8, merge_priority=1)
+W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20, capacity=0.8, merge_priority=1)
+W.addLink("link3", "merge", "dest", length=1000, free_flow_speed=20)
+
+# Define the vehicle demand
 W.adddemand("orig1", "dest", t_start=0, t_end=1000, flow=0.45)
 W.adddemand("orig2", "dest", t_start=400, t_end=1000, flow=0.6)
 
+# Run the simulation
 W.exec_simulation()
 
+# Analysis
 W.analyzer.print_simple_stats()
 
 W.analyzer.network(t=200)
@@ -68,9 +76,8 @@ Simulation completed. merge
 ```bash
 pip install unsim
 ```
-If you want to use [JAX](https://docs.jax.dev/en/latest/) acceleration, install your preferred JAX build with a command such as `jax[cpu]` and `jax[cuda13]`.
-The optimal installation depends on your hardware and software configuration, so please check the details by yourself.
-
+If you want to use JAX acceleration, install your preferred JAX build such as `jax[cpu]` and `jax[cuda13]`.
+The optimal installation depends on your hardware and software configuration, so please check the [JAX official document](https://docs.jax.dev/en/latest/installation.html).
 ## Terms of Use & License
 
 UNsim is released under the MIT License. You are free to use it as long as the source is acknowledged.
