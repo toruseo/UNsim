@@ -15,8 +15,12 @@
 
 ## Simulation Examples
 
-A simple demonstration will be added.
-See `examples/` for now.
+
+<img width="500" alt="grid11x11_anim_linkbased_3hours_11km_60000vehs_5sec_by_2GHz_cpu" src="https://github.com/user-attachments/assets/c0508731-a352-4ca6-aa9c-17e7e838f4f1" />
+
+60000 vehicles travel through a 10 km grid network over 3 hours. 
+Dark colors indicate congestion (slow speeds). 
+The simulation wall-clock time was 5 seconds on a 2.0 GHz CPU in pure Python mode.
 
 ## Usage
 
