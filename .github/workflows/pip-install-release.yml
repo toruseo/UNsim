@@ -27,4 +27,4 @@ jobs:
         run: python -m pip install unsim
 
       - name: Smoke test
-        run: python tests/pip_install_smoke.py
+        run: python -m pytest -q tests/test_verification_straight_road.py::test_1link
