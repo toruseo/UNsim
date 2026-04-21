@@ -26,5 +26,8 @@ jobs:
       - name: Install from PyPI
         run: python -m pip install unsim
 
+      - name: Install test runner
+        run: python -m pip install pytest
+
       - name: Smoke test
         run: python -m pytest -q tests/test_verification_straight_road.py::test_1link
