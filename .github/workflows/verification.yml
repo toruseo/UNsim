@@ -3,7 +3,10 @@ name: Verification
 on:
   push:
   pull_request:
-  workflow_dispatch:
+  workflow_dispatch:  
+  schedule:
+    - cron: '0 6 * * 1'
+
 
 jobs:
   test:
