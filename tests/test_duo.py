@@ -446,6 +446,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     imgdir = os.path.join(os.path.dirname(__file__), "..", "docs", "img")
+    os.makedirs(imgdir, exist_ok=True)
 
     # Part 1: Kuwahara quantitative checks
     print(f"\n{'='*60}\n  Kuwahara & Akamatsu (2001) Fig. 5-7 Checks\n{'='*60}")
