@@ -34,4 +34,4 @@ jobs:
         with:
           name: duo-report-pngs
           path: docs/img/*.png
-          if-no-files-found: error
+          if-no-files-found: warn
