@@ -21,14 +21,14 @@ def main():
         if unsim_path.is_relative_to(repo_root):
             raise AssertionError(f"unsim imported from repository path: {unsim_path}")
 
-        W = World(name="smoke", tmax=1200, print_mode=0, save_mode=0, show_mode=0)
-        W.addNode("orig", x=0, y=0)
-        W.addNode("dest", x=1, y=0)
-        W.addLink("link", "orig", "dest", length=1000, free_flow_speed=20)
-        W.adddemand("orig", "dest", t_start=0, t_end=1000, flow=0.3)
-        W.exec_simulation()
+        world = World(name="smoke", tmax=1200, print_mode=0, save_mode=0, show_mode=0)
+        world.addNode("orig", x=0, y=0)
+        world.addNode("dest", x=1, y=0)
+        world.addLink("link", "orig", "dest", length=1000, free_flow_speed=20)
+        world.adddemand("orig", "dest", t_start=0, t_end=1000, flow=0.3)
+        world.exec_simulation()
 
-        assert W.get_link("link").cum_departure[-1] > 0
+        assert world.get_link("link").cum_departure[-1] > 0
         print("pip install smoke test passed")
 
 
