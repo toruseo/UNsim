@@ -198,6 +198,39 @@ class ScanCarry(NamedTuple):
     prev_dists: jnp.ndarray
 
 
+class FwdCarry(NamedTuple):
+    """Forward-only carry for jax.lax.scan (no AD tape).
+
+    Uses full-history arrays instead of sliding windows.
+    When used without jax.grad, XLA does not retain intermediate carries,
+    eliminating reverse-mode AD memory overhead.
+
+    Attributes
+    ----------
+    cum_arrival : jnp.ndarray, (n_links, tsize+1)
+        Full cumulative arrivals history.
+    cum_departure : jnp.ndarray, (n_links, tsize+1)
+        Full cumulative departures history.
+    demand_queue : jnp.ndarray, (n_nodes,)
+    absorbed_count : jnp.ndarray, (n_nodes,)
+    cum_arrival_d_cur : jnp.ndarray, (n_links, n_dests)
+        Per-destination cumulative arrivals at current time only.
+    cum_departure_d_cur : jnp.ndarray, (n_links, n_dests)
+        Per-destination cumulative departures at current time only.
+    prev_next_link_ids : jnp.ndarray, (n_dests, n_nodes)
+    prev_dists : jnp.ndarray, (n_dests, n_nodes)
+        Cached shortest-path distances from last route update.
+    """
+    cum_arrival: jnp.ndarray
+    cum_departure: jnp.ndarray
+    demand_queue: jnp.ndarray
+    absorbed_count: jnp.ndarray
+    cum_arrival_d_cur: jnp.ndarray
+    cum_departure_d_cur: jnp.ndarray
+    prev_next_link_ids: jnp.ndarray
+    prev_dists: jnp.ndarray
+
+
 class StepOutput(NamedTuple):
     """Per-step output from scan for SimState reconstruction.
 
@@ -214,6 +247,38 @@ class StepOutput(NamedTuple):
     demand_queue: jnp.ndarray
     inflow_d: jnp.ndarray
     outflow_d: jnp.ndarray
+
+
+class AoNFwdCarry(NamedTuple):
+    """Forward-only carry for AoN scan (minimal, no BF cache).
+
+    Routes are precomputed before the scan loop, so no need to carry
+    prev_next_link_ids or prev_dists. Eliminates per-destination
+    arrays from stacked outputs to dramatically reduce memory.
+
+    demand_queue_history is kept in the carry (not stacked outputs) so
+    that the scan output is empty, avoiding all stacked allocations.
+
+    Attributes
+    ----------
+    cum_arrival : jnp.ndarray, (n_links, tsize+1)
+    cum_departure : jnp.ndarray, (n_links, tsize+1)
+    demand_queue : jnp.ndarray, (n_nodes,)
+    absorbed_count : jnp.ndarray, (n_nodes,)
+    cum_arrival_d_cur : jnp.ndarray, (n_links, n_dests)
+        Per-destination cumulative arrivals at current time only.
+    cum_departure_d_cur : jnp.ndarray, (n_links, n_dests)
+        Per-destination cumulative departures at current time only.
+    demand_queue_history : jnp.ndarray, (n_nodes, tsize)
+        Full history of demand queues (for total_travel_time).
+    """
+    cum_arrival: jnp.ndarray
+    cum_departure: jnp.ndarray
+    demand_queue: jnp.ndarray
+    absorbed_count: jnp.ndarray
+    cum_arrival_d_cur: jnp.ndarray
+    cum_departure_d_cur: jnp.ndarray
+    demand_queue_history: jnp.ndarray
 
 
 # ================================================================
@@ -250,6 +315,25 @@ def _make_fake_state(carry, config):
     return SimState(
         cum_arrival=carry.cum_arrival_w,
         cum_departure=carry.cum_departure_w,
+        demand_queue=carry.demand_queue,
+        absorbed_count=carry.absorbed_count,
+        demand_queue_history=jnp.zeros((config.n_nodes, 1)),
+        cum_arrival_d=jnp.zeros((config.n_links, n_dests, 1)),
+        cum_departure_d=jnp.zeros((config.n_links, n_dests, 1)),
+        prev_next_link_ids=carry.prev_next_link_ids,
+    )
+
+
+def _make_state_from_fwd_carry(carry, config):
+    """Build a lightweight SimState from FwdCarry for compute functions.
+
+    Unlike ``_make_fake_state``, the arrays here are full-history so
+    ``t_index`` passed to compute functions is the absolute timestep.
+    """
+    n_dests = max(config.n_dests, 1)
+    return SimState(
+        cum_arrival=carry.cum_arrival,
+        cum_departure=carry.cum_departure,
         demand_queue=carry.demand_queue,
         absorbed_count=carry.absorbed_count,
         demand_queue_history=jnp.zeros((config.n_nodes, 1)),
@@ -670,6 +754,63 @@ def simulation_step(carry, t_index, params, link_state, config):
     return new_carry, output
 
 
+def simulation_step_fwd(carry, t_index, params, link_state, config):
+    """One LTM timestep for forward-only jax.lax.scan (full-array carry).
+
+    Uses absolute ``t_index`` into full-history arrays instead of a sliding
+    window.  Avoids the per-step concatenate/shift of the windowed carry.
+
+    Parameters
+    ----------
+    carry : FwdCarry
+    t_index : jnp scalar int (absolute timestep index)
+    params : Params
+    link_state : LinkState
+    config : NetworkConfig
+
+    Returns
+    -------
+    (new_carry, StepOutput)
+    """
+    dt = config.deltat
+    n_dests = max(config.n_dests, 1)
+
+    # Build SimState view backed by full-history arrays
+    state = _make_state_from_fwd_carry(carry, config)
+
+    # Compute demands / supplies using absolute t_index
+    demands = compute_demands(t_index, state, link_state, params, config)
+    supplies = compute_supplies(t_index, state, link_state, params, config)
+
+    # Node transfers
+    inflow_rates, outflow_rates, new_dq, new_abs = compute_node_transfers(
+        t_index, demands, supplies, state, params, config)
+
+    # Update full arrays at t_index + 1
+    new_cum_arr = carry.cum_arrival[:, t_index] + dt * inflow_rates
+    new_cum_dep = carry.cum_departure[:, t_index] + dt * outflow_rates
+
+    new_carry = FwdCarry(
+        cum_arrival=carry.cum_arrival.at[:, t_index + 1].set(new_cum_arr),
+        cum_departure=carry.cum_departure.at[:, t_index + 1].set(new_cum_dep),
+        demand_queue=new_dq,
+        absorbed_count=new_abs,
+        cum_arrival_d_cur=carry.cum_arrival_d_cur,
+        cum_departure_d_cur=carry.cum_departure_d_cur,
+        prev_next_link_ids=carry.prev_next_link_ids,
+        prev_dists=carry.prev_dists,
+    )
+
+    output = StepOutput(
+        inflow_rates=inflow_rates,
+        outflow_rates=outflow_rates,
+        demand_queue=new_dq,
+        inflow_d=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+        outflow_d=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+    )
+    return new_carry, output
+
+
 def _reconstruct_state(final_carry, outputs, config):
     """Reconstruct full SimState from scan outputs via cumulative sum."""
     dt = config.deltat
@@ -706,13 +847,49 @@ def _reconstruct_state(final_carry, outputs, config):
     )
 
 
-def simulate(params, config):
-    """Run full LTM simulation. Differentiable w.r.t. params.
+def _build_state_fwd(final_carry, outputs, config):
+    """Build SimState from forward-only scan results.
+
+    Uses cum_arrival / cum_departure directly from the carry (already
+    full-history) instead of re-integrating flow rates.
+    Per-destination cumulative arrays are still reconstructed from outputs.
+    """
+    n_dests = max(config.n_dests, 1)
+    dt = config.deltat
+
+    demand_queue_history = outputs.demand_queue.T  # (tsize, n_nodes) -> (n_nodes, tsize)
+
+    cum_arrival_d = jnp.zeros((config.n_links, n_dests, config.tsize + 1), dtype=jnp.float32)
+    cum_arrival_d = cum_arrival_d.at[:, :, 1:].set(
+        jnp.cumsum(outputs.inflow_d, axis=0).transpose(1, 2, 0) * dt)
+
+    cum_departure_d = jnp.zeros((config.n_links, n_dests, config.tsize + 1), dtype=jnp.float32)
+    cum_departure_d = cum_departure_d.at[:, :, 1:].set(
+        jnp.cumsum(outputs.outflow_d, axis=0).transpose(1, 2, 0) * dt)
+
+    return SimState(
+        cum_arrival=final_carry.cum_arrival,
+        cum_departure=final_carry.cum_departure,
+        demand_queue=final_carry.demand_queue,
+        absorbed_count=final_carry.absorbed_count,
+        demand_queue_history=demand_queue_history,
+        cum_arrival_d=cum_arrival_d,
+        cum_departure_d=cum_departure_d,
+        prev_next_link_ids=final_carry.prev_next_link_ids,
+    )
+
+
+def simulate(params, config, differentiable=True):
+    """Run full LTM simulation.
 
     Parameters
     ----------
     params : Params
     config : NetworkConfig
+    differentiable : bool, optional
+        If True (default), use windowed carry suitable for jax.grad.
+        If False, use full-array carry for faster forward-only evaluation
+        (not compatible with reverse-mode AD).
 
     Returns
     -------
@@ -720,24 +897,39 @@ def simulate(params, config):
         Final simulation state.
     """
     link_state = compute_link_state(params, config)
-    W = config.window_size
     n_dests = max(config.n_dests, 1)
 
-    init_carry = ScanCarry(
-        cum_arrival_w=jnp.zeros((config.n_links, W + 1), dtype=jnp.float32),
-        cum_departure_w=jnp.zeros((config.n_links, W + 1), dtype=jnp.float32),
-        demand_queue=jnp.zeros(config.n_nodes, dtype=jnp.float32),
-        absorbed_count=jnp.zeros(config.n_nodes, dtype=jnp.float32),
-        cum_arrival_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
-        cum_departure_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
-        prev_next_link_ids=jnp.full((n_dests, config.n_nodes), -1, dtype=jnp.int32),
-        prev_dists=jnp.full((n_dests, config.n_nodes), 1e15, dtype=jnp.float32),
-    )
-
-    step_fn = functools.partial(simulation_step,
-                                params=params, link_state=link_state, config=config)
-    final_carry, outputs = jax.lax.scan(step_fn, init_carry, jnp.arange(config.tsize))
-    return _reconstruct_state(final_carry, outputs, config)
+    if differentiable:
+        W = config.window_size
+        init_carry = ScanCarry(
+            cum_arrival_w=jnp.zeros((config.n_links, W + 1), dtype=jnp.float32),
+            cum_departure_w=jnp.zeros((config.n_links, W + 1), dtype=jnp.float32),
+            demand_queue=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+            absorbed_count=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+            cum_arrival_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+            cum_departure_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+            prev_next_link_ids=jnp.full((n_dests, config.n_nodes), -1, dtype=jnp.int32),
+            prev_dists=jnp.full((n_dests, config.n_nodes), 1e15, dtype=jnp.float32),
+        )
+        step_fn = functools.partial(simulation_step,
+                                    params=params, link_state=link_state, config=config)
+        final_carry, outputs = jax.lax.scan(step_fn, init_carry, jnp.arange(config.tsize))
+        return _reconstruct_state(final_carry, outputs, config)
+    else:
+        init_carry = FwdCarry(
+            cum_arrival=jnp.zeros((config.n_links, config.tsize + 1), dtype=jnp.float32),
+            cum_departure=jnp.zeros((config.n_links, config.tsize + 1), dtype=jnp.float32),
+            demand_queue=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+            absorbed_count=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+            cum_arrival_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+            cum_departure_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+            prev_next_link_ids=jnp.full((n_dests, config.n_nodes), -1, dtype=jnp.int32),
+            prev_dists=jnp.full((n_dests, config.n_nodes), 1e15, dtype=jnp.float32),
+        )
+        step_fn = functools.partial(simulation_step_fwd,
+                                    params=params, link_state=link_state, config=config)
+        final_carry, outputs = jax.lax.scan(step_fn, init_carry, jnp.arange(config.tsize))
+        return _build_state_fwd(final_carry, outputs, config)
 
 
 # ================================================================
@@ -760,9 +952,14 @@ def total_travel_time(state, config):
     jnp scalar
     """
     dt = config.deltat
+    # n_on_link = N_U - N_D >= 0 by model invariant (departures cannot
+    # exceed arrivals).  Tiny negatives (~ -1e-5) are float32 artifacts.
+    # Omitting jnp.maximum avoids the 0.5-gradient artifact at exact-zero
+    # timesteps, which otherwise leaks phantom gradients to unrelated params.
     n_on_link = state.cum_arrival[:, :config.tsize] - state.cum_departure[:, :config.tsize]
-    link_ttt = jnp.sum(jnp.maximum(n_on_link, 0.0)) * dt
-    queue_ttt = jnp.sum(jnp.maximum(state.demand_queue_history, 0.0)) * dt
+    link_ttt = jnp.sum(n_on_link) * dt
+    # demand_queue_history is already clamped >= 0 at each simulation step.
+    queue_ttt = jnp.sum(state.demand_queue_history) * dt
     return link_ttt + queue_ttt
 
 
@@ -863,12 +1060,19 @@ def invert_interp_1d(array_1d, value):
     idx = jnp.searchsorted(array_1d, value, side='right')
     idx = jnp.clip(idx, 1, n - 1)
     lo = idx - 1
-    # Differentiable linear interpolation within the segment
+    # Differentiable linear interpolation within the segment.
+    # Straight-through clip: forward value is clamped for safety,
+    # but gradient flows through unclipped to avoid 0.5 attenuation
+    # at exact grid-point matches (frac=0 or frac=1).
     a_lo = array_1d[lo]
     a_hi = array_1d[idx]
     slope = jnp.maximum(a_hi - a_lo, 1e-10)
-    frac = jnp.clip((value - a_lo) / slope, 0.0, 1.0)
-    return jnp.clip((lo + frac).astype(jnp.float32), 0.0, n - 1.0)
+    raw_frac = (value - a_lo) / slope
+    frac = raw_frac + jax.lax.stop_gradient(
+        jnp.clip(raw_frac, 0.0, 1.0) - raw_frac)
+    result = (lo + frac).astype(jnp.float32)
+    return result + jax.lax.stop_gradient(
+        jnp.clip(result, 0.0, n - 1.0) - result)
 
 
 def link_exit_time(link_id, t_enter, state, params, config):
@@ -933,6 +1137,637 @@ def travel_time(path_link_ids, t_depart, state, params, config):
     for lid in path_link_ids:
         t_current = link_exit_time(lid, t_current, state, params, config)
     return t_current - t_depart
+
+
+# ================================================================
+# Autodiff-compatible travel time (soft route choice)
+# ================================================================
+
+def invert_interp_batch(arrays_2d, values):
+    """Find fractional indices where rows of a 2D array reach target values.
+
+    Batch version of ``invert_interp_1d``: for each row *i*, find the
+    fractional index *t_i* such that ``arrays_2d[i, t_i] ~ values[i]``.
+
+    Parameters
+    ----------
+    arrays_2d : jnp.ndarray, (K, m)
+        Each row is monotonically non-decreasing (e.g. cumulative departures).
+    values : jnp.ndarray, (K,)
+        Target cumulative counts per row.
+
+    Returns
+    -------
+    jnp.ndarray, (K,)
+        Fractional indices (multiply by ``dt`` to obtain time in seconds).
+    """
+    n = arrays_2d.shape[1]
+    # Segment selection: vmap searchsorted over rows (non-differentiable part)
+    idx = jax.vmap(lambda row, v: jnp.searchsorted(row, v, side='right'))(
+        arrays_2d, values)
+    idx = jnp.clip(idx, 1, n - 1)
+    lo = idx - 1
+    # Differentiable linear interpolation within the segment.
+    # Straight-through clip (see invert_interp_1d for rationale).
+    row_ids = jnp.arange(arrays_2d.shape[0])
+    a_lo = arrays_2d[row_ids, lo]
+    a_hi = arrays_2d[row_ids, idx]
+    slope = jnp.maximum(a_hi - a_lo, 1e-10)
+    raw_frac = (values - a_lo) / slope
+    frac = raw_frac + jax.lax.stop_gradient(
+        jnp.clip(raw_frac, 0.0, 1.0) - raw_frac)
+    result = (lo + frac).astype(jnp.float32)
+    return result + jax.lax.stop_gradient(
+        jnp.clip(result, 0.0, n - 1.0) - result)
+
+
+def link_exit_time_batch(link_ids, t_enters, state, params, config):
+    """Compute exit times for multiple links simultaneously. Differentiable.
+
+    Batch version of ``link_exit_time`` using vectorized operations.
+
+    Parameters
+    ----------
+    link_ids : jnp.ndarray, (K,) int32
+        Link indices.
+    t_enters : jnp.ndarray, (K,) float32
+        Entry times per link (s).
+    state : SimState
+    params : Params
+    config : NetworkConfig
+
+    Returns
+    -------
+    jnp.ndarray, (K,) float32
+        Exit times (s).
+    """
+    dt = config.deltat
+    d = config.link_lengths[link_ids]
+    u = params.u[link_ids]
+
+    # Cumulative count at upstream at t_enter
+    N = interp_batch(state.cum_arrival[link_ids], t_enters / dt)
+
+    # Free-flow constraint
+    t_freeflow = t_enters + d / u
+
+    # Queuing constraint
+    t_queue = invert_interp_batch(state.cum_departure[link_ids], N) * dt
+
+    return jnp.maximum(t_freeflow, t_queue)
+
+
+def compute_link_cost_from_state(t_depart, state, params, config):
+    """Compute generalized link costs from post-simulation state. Differentiable.
+
+    Recomputes a ``LinkState`` and instantaneous travel times at
+    ``t_depart``, then adds the toll component.
+
+    Parameters
+    ----------
+    t_depart : float or jnp scalar
+        Departure time (s).
+    state : SimState
+    params : Params
+    config : NetworkConfig
+
+    Returns
+    -------
+    link_cost : jnp.ndarray, (n_links,)
+        Generalized link cost (travel time + toll, in seconds).
+    link_tt : jnp.ndarray, (n_links,)
+        Instantaneous link travel time (s) without toll.
+    """
+    link_state = compute_link_state(params, config)
+    t_index = jnp.clip(
+        jnp.floor(t_depart / config.deltat).astype(jnp.int32),
+        0, config.tsize - 1)
+    link_tt = compute_instantaneous_tt(
+        t_index, state, link_state, params, config, method=config.tt_method)
+    toll_step = jnp.minimum(
+        t_index // config.toll_step_size, config.n_toll_steps - 1)
+    current_toll = params.toll[:, toll_step]
+    return link_tt + current_toll, link_tt
+
+
+def travel_time_soft(origin_node, dest_node, t_depart, state, params, config,
+                     temperature=None, max_hops=None):
+    """Expected travel time with soft route choice. Fully differentiable.
+
+    Propagates a probability distribution over nodes through the network
+    using logit softmax routing probabilities and Newell-based congestion-
+    aware link exit times.  The gradient captures both congestion effects
+    and route-switching effects.
+
+    Parameters
+    ----------
+    origin_node : int
+        Origin node ID.
+    dest_node : int
+        Destination node ID.
+    t_depart : float or jnp scalar
+        Departure time (s).
+    state : SimState
+        Post-simulation state (from ``simulate``, ``simulate_duo``, etc.).
+    params : Params
+    config : NetworkConfig
+    temperature : float or None, optional
+        Logit temperature (s).  Lower values approach deterministic
+        shortest-path routing.  Defaults to ``config.logit_temperature``.
+    max_hops : int or None, optional
+        Maximum propagation hops.  Defaults to ``config.n_nodes``.
+
+    Returns
+    -------
+    jnp scalar
+        Expected travel time (s).
+    """
+    tau = temperature if temperature is not None else config.logit_temperature
+    n_hops = max_hops if max_hops is not None else config.n_nodes
+    n_nodes = config.n_nodes
+    max_out = config.max_out
+
+    # --- 1. Link costs at departure time ---
+    link_cost, _ = compute_link_cost_from_state(t_depart, state, params, config)
+
+    # --- 2. Bellman-Ford shortest distances to dest_node ---
+    dists, _ = bellman_ford_reverse(link_cost, dest_node, config)
+
+    # --- 3. Logit routing probabilities at all nodes ---
+    safe_outlinks = jnp.maximum(config.node_outlinks, 0)   # (n_nodes, max_out)
+    outlink_valid = config.node_outlinks >= 0               # (n_nodes, max_out)
+    outlink_end = config.link_end_node[safe_outlinks]       # (n_nodes, max_out)
+    safe_end = jnp.maximum(outlink_end, 0)
+
+    dist_from_end = dists[safe_end]                         # (n_nodes, max_out)
+    cost_via = link_cost[safe_outlinks] + dist_from_end     # (n_nodes, max_out)
+
+    INF = 1e15
+    has_out = config.node_n_outlinks > 0                    # (n_nodes,)
+    logits = jnp.where(outlink_valid, -cost_via / tau, -INF)
+    logits = jnp.where(has_out[:, None], logits, 0.0)
+    route_probs = jax.nn.softmax(logits, axis=-1)           # (n_nodes, max_out)
+
+    # --- 4. Node probability propagation ---
+    prob_init = jnp.zeros(n_nodes, dtype=jnp.float32).at[origin_node].set(1.0)
+    tw_init = jnp.zeros(n_nodes, dtype=jnp.float32).at[origin_node].set(
+        jnp.float32(t_depart))
+
+    # Precompute downstream node ids for scatter-add
+    flat_end = safe_end.reshape(-1)                         # (n_nodes * max_out,)
+    flat_valid = outlink_valid.reshape(-1)                  # (n_nodes * max_out,)
+    flat_lids = safe_outlinks.reshape(-1)                   # (n_nodes * max_out,)
+
+    def hop_fn(_, carry):
+        prob, t_weighted, acc_prob, acc_time = carry
+
+        # Expected arrival time at each node.
+        # Use safe divisor: replace near-zero prob with 1.0 to avoid
+        # 1/eps gradient explosion in the backward pass.
+        safe_prob = jnp.where(prob > 1e-8, prob, 1.0)
+        t_arr = t_weighted / safe_prob                      # (n_nodes,)
+
+        # Batch link_exit_time for all (node, outlink) pairs
+        flat_t_enter = jnp.repeat(t_arr, max_out)          # (n_nodes * max_out,)
+        flat_exit = link_exit_time_batch(
+            flat_lids, flat_t_enter, state, params, config)
+        exit_times = flat_exit.reshape(n_nodes, max_out)    # (n_nodes, max_out)
+
+        # Stop gradient on exit_times for near-zero-probability nodes
+        # to prevent NaN from large invert_interp gradients on flat
+        # cumulative curves at irrelevant (node, time) pairs.
+        active = (prob > 1e-8)[:, None]                     # (n_nodes, 1)
+        exit_times = jnp.where(
+            active, exit_times, jax.lax.stop_gradient(exit_times))
+
+        # Transfer probability and weighted time along each outlink
+        transfer_p = prob[:, None] * route_probs            # (n_nodes, max_out)
+        transfer_p = jnp.where(outlink_valid, transfer_p, 0.0)
+        transfer_t = transfer_p * exit_times                # (n_nodes, max_out)
+
+        # Scatter-add to downstream nodes
+        flat_tp = transfer_p.reshape(-1)
+        flat_tt = transfer_t.reshape(-1)
+
+        new_prob = jnp.zeros(n_nodes, dtype=jnp.float32).at[flat_end].add(
+            jnp.where(flat_valid, flat_tp, 0.0))
+        new_tw = jnp.zeros(n_nodes, dtype=jnp.float32).at[flat_end].add(
+            jnp.where(flat_valid, flat_tt, 0.0))
+
+        # Absorb at destination
+        dest_p = new_prob[dest_node]
+        dest_t = new_tw[dest_node]
+        acc_prob = acc_prob + dest_p
+        acc_time = acc_time + dest_t
+        new_prob = new_prob.at[dest_node].set(0.0)
+        new_tw = new_tw.at[dest_node].set(0.0)
+
+        return (new_prob, new_tw, acc_prob, acc_time)
+
+    init = (prob_init, tw_init,
+            jnp.float32(0.0), jnp.float32(0.0))
+    _, _, final_acc_prob, final_acc_time = jax.lax.fori_loop(
+        0, n_hops, hop_fn, init)
+
+    return final_acc_time / jnp.maximum(final_acc_prob, 1e-30) - t_depart
+
+
+def logsum_travel_time(origin_node, dest_node, t_depart, state, params, config,
+                       temperature=None):
+    """Expected minimum travel time via the logsum Bellman equation. Differentiable.
+
+    Uses the logsum (log-sum-exp) formula from random utility theory::
+
+        V(dest) = 0
+        V(n) = -tau * log( sum_o exp(-(c_o + V(end_o)) / tau) )
+
+    where ``c_o`` is the generalized cost of outlink *o*.  This is
+    equivalent to "soft Bellman-Ford" and gives the expected perceived
+    cost under the logit route choice model.
+
+    Parameters
+    ----------
+    origin_node : int
+        Origin node ID.
+    dest_node : int
+        Destination node ID.
+    t_depart : float or jnp scalar
+        Departure time (s), used to evaluate instantaneous link costs.
+    state : SimState
+    params : Params
+    config : NetworkConfig
+    temperature : float or None, optional
+        Logit temperature (s).  Defaults to ``config.logit_temperature``.
+
+    Returns
+    -------
+    jnp scalar
+        Expected perceived travel time (s).
+    """
+    tau = temperature if temperature is not None else config.logit_temperature
+    n_nodes = config.n_nodes
+    INF = 1e15
+
+    link_cost, _ = compute_link_cost_from_state(t_depart, state, params, config)
+
+    safe_outlinks = jnp.maximum(config.node_outlinks, 0)   # (n_nodes, max_out)
+    outlink_valid = config.node_outlinks >= 0
+    outlink_end = config.link_end_node[safe_outlinks]
+    safe_end = jnp.maximum(outlink_end, 0)
+    has_out = config.node_n_outlinks > 0                    # (n_nodes,)
+
+    V = jnp.full(n_nodes, INF, dtype=jnp.float32).at[dest_node].set(0.0)
+
+    def relax(V, _):
+        cost_via = link_cost[safe_outlinks] + V[safe_end]   # (n_nodes, max_out)
+        logits = jnp.where(outlink_valid, -cost_via / tau, -INF)
+        logits = jnp.where(has_out[:, None], logits, -INF)
+        # V_new(n) = -tau * logsumexp(-cost_via / tau)
+        V_new = -tau * jax.nn.logsumexp(logits, axis=-1)    # (n_nodes,)
+        V_new = jnp.where(has_out, V_new, INF)
+        V_new = V_new.at[dest_node].set(0.0)
+        return jnp.minimum(V, V_new), None
+
+    max_iter = int(n_nodes**0.5) + 2
+    V_final, _ = jax.lax.scan(relax, V, None, length=max_iter)
+    return V_final[origin_node]
+
+
+def travel_time_auto(origin_node, dest_node, t_depart, state, params, config):
+    """Travel time along the auto-derived shortest path. Partially differentiable.
+
+    Extracts the shortest path from a Bellman-Ford tree computed on
+    instantaneous link costs at ``t_depart``, then chains
+    ``link_exit_time`` along that path for a congestion-aware travel time.
+
+    The path selection itself is **not** differentiable (discrete argmin),
+    so the gradient only captures congestion effects along the fixed route,
+    not route-switching effects.  For full differentiability use
+    ``travel_time_soft``.
+
+    Parameters
+    ----------
+    origin_node : int
+        Origin node ID.
+    dest_node : int
+        Destination node ID.
+    t_depart : float or jnp scalar
+        Departure time (s).
+    state : SimState
+    params : Params
+    config : NetworkConfig
+
+    Returns
+    -------
+    jnp scalar
+        Travel time (s).
+    """
+    link_cost, _ = compute_link_cost_from_state(t_depart, state, params, config)
+    _, next_link_ids = bellman_ford_reverse(link_cost, dest_node, config)
+    # Stop gradient on the discrete route choice
+    next_link_ids = jax.lax.stop_gradient(next_link_ids)
+
+    max_path = config.n_nodes
+
+    # Extract path via fori_loop (JIT compatible)
+    def extract_step(i, carry):
+        path, current_node, done = carry
+        lid = next_link_ids[current_node]
+        safe_lid = jnp.maximum(lid, 0)
+        next_nd = config.link_end_node[safe_lid]
+        valid = (~done) & (lid >= 0)
+        path = jnp.where(valid, path.at[i].set(lid), path)
+        current_node = jnp.where(valid, next_nd, current_node)
+        done = done | (~valid) | (next_nd == dest_node)
+        return (path, current_node, done)
+
+    path_init = jnp.full(max_path, -1, dtype=jnp.int32)
+    path, _, _ = jax.lax.fori_loop(
+        0, max_path, extract_step,
+        (path_init, jnp.int32(origin_node), jnp.bool_(False)))
+
+    # Chain link_exit_time over valid path entries
+    def chain_step(i, t_current):
+        lid = path[i]
+        safe_lid = jnp.maximum(lid, 0)
+        t_next = link_exit_time(safe_lid, t_current, state, params, config)
+        return jnp.where(lid >= 0, t_next, t_current)
+
+    t_final = jax.lax.fori_loop(0, max_path, chain_step, jnp.float32(t_depart))
+    return t_final - t_depart
+
+
+# ================================================================
+# AON (All-or-Nothing) -> fixed route simulation
+# ================================================================
+
+def _aon_simulation_step_fwd(carry, scan_input, params, link_state, config,
+                              route_match, origin_ids):
+    """One AoN timestep for forward-only jax.lax.scan (minimal carry).
+
+    Uses precomputed ``route_match`` instead of running Bellman-Ford or
+    computing travel times at each step.  Does not output per-destination
+    arrays, saving O(tsize * n_links * n_dests) memory.
+
+    Parameters
+    ----------
+    carry : AoNFwdCarry
+    scan_input : tuple (t_index, od_weights_compact)
+        t_index : jnp scalar int (absolute timestep index)
+        od_weights_compact : jnp.ndarray, (n_origins, n_dests)
+            Per-OD demand rates for origin nodes at this timestep.
+    params : Params
+        Slim params with od_demand_rate zeroed out.
+    link_state : LinkState
+    config : NetworkConfig
+    route_match : jnp.ndarray, (n_dests, n_nodes, max_out)
+        Precomputed routing indicator (hard 0/1 for AoN).
+    origin_ids : jnp.ndarray, (n_origins,) int32
+        Indices of origin nodes.
+
+    Returns
+    -------
+    (AoNFwdCarry, None)
+    """
+    t_index, od_weights_compact = scan_input
+    dt = config.deltat
+    n_links = config.n_links
+    n_nodes = config.n_nodes
+    n_dests = config.n_dests
+
+    # Build SimState view backed by full-history arrays
+    n_dests_safe = max(n_dests, 1)
+    state = SimState(
+        cum_arrival=carry.cum_arrival,
+        cum_departure=carry.cum_departure,
+        demand_queue=carry.demand_queue,
+        absorbed_count=carry.absorbed_count,
+        demand_queue_history=jnp.zeros((n_nodes, 1)),
+        cum_arrival_d=jnp.zeros((n_links, n_dests_safe, 1)),
+        cum_departure_d=jnp.zeros((n_links, n_dests_safe, 1)),
+        prev_next_link_ids=jnp.zeros((n_dests_safe, n_nodes), dtype=jnp.int32),
+    )
+
+    # Step 1: LTM demands/supplies
+    demands = compute_demands(t_index, state, link_state, params, config)
+    supplies = compute_supplies(t_index, state, link_state, params, config)
+
+    # Step 2: Dynamic diverge ratios from precomputed route_match
+    n_on_d = carry.cum_arrival_d_cur - carry.cum_departure_d_cur  # (n_links, n_dests)
+    n_on_d = jnp.maximum(n_on_d, 0.0)
+
+    is_origin = config.node_type == 0  # (n_nodes,)
+
+    safe_inlinks = jnp.maximum(config.node_inlinks, 0)  # (n_nodes, max_in)
+    inlink_valid = config.node_inlinks >= 0  # (n_nodes, max_in)
+    inlink_veh = n_on_d[safe_inlinks]  # (n_nodes, max_in, n_dests)
+    inlink_veh = inlink_veh * inlink_valid[:, :, None]
+    node_inlink_total = jnp.sum(inlink_veh, axis=1)  # (n_nodes, n_dests)
+
+    # Expand compact OD demand to full node array
+    od_weights = jnp.zeros((n_nodes, n_dests), dtype=jnp.float32)
+    od_weights = od_weights.at[origin_ids].set(od_weights_compact)
+    dest_weight = jnp.where(is_origin[:, None], od_weights, node_inlink_total)
+
+    safe_outlinks = jnp.maximum(config.node_outlinks, 0)  # (n_nodes, max_out)
+    outlink_valid = config.node_outlinks >= 0  # (n_nodes, max_out)
+
+    outlink_flow = jnp.einsum("nd,dno->no", dest_weight, route_match)
+
+    total = jnp.sum(outlink_flow, axis=1, keepdims=True)  # (n_nodes, 1)
+    n_out = config.node_n_outlinks[:, None]
+    equal_split = jnp.where(
+        jnp.arange(config.max_out)[None, :] < n_out,
+        1.0 / jnp.maximum(n_out, 1), 0.0)
+    duo_diverge = jnp.where(total > 1e-10,
+                             outlink_flow / jnp.maximum(total, 1e-10),
+                             equal_split)
+
+    duo_tf = jnp.broadcast_to(duo_diverge[:, None, :],
+                               (n_nodes, config.max_in, config.max_out))
+    params_duo = params._replace(diverge_ratios=duo_diverge,
+                                  turning_fractions=duo_tf)
+
+    # Step 3: Node models
+    inflows, outflows, new_dq, _ = compute_node_transfers(
+        t_index, demands, supplies, state, params_duo, config)
+
+    # Step 4: FIFO allocation of departures by destination
+    total_arr = carry.cum_arrival[:, t_index]  # (n_links,)
+    arr_d = carry.cum_arrival_d_cur  # (n_links, n_dests)
+    fifo_ratio = jnp.where(
+        total_arr[:, None] > 1e-10,
+        arr_d / jnp.maximum(total_arr[:, None], 1e-10),
+        0.0)
+    outflow_d = outflows[:, None] * fifo_ratio  # (n_links, n_dests)
+
+    # Step 5: Route per-dest traffic
+    new_absorbed = carry.absorbed_count
+
+    inlink_outflow_d = outflow_d[safe_inlinks]  # (n_nodes, max_in, n_dests)
+    inlink_outflow_d = inlink_outflow_d * inlink_valid[:, :, None]
+    node_arriving = jnp.sum(inlink_outflow_d, axis=1)  # (n_nodes, n_dests)
+
+    node_arriving = node_arriving + jnp.where(
+        is_origin[:, None], od_weights, 0.0)
+
+    dest_mask = (config.dest_node_ids[None, :] == jnp.arange(n_nodes)[:, None])
+    absorb_per_node = jnp.sum(jnp.where(dest_mask, node_arriving, 0.0), axis=1)
+    new_absorbed = new_absorbed + absorb_per_node * dt
+    node_arriving = jnp.where(dest_mask, 0.0, node_arriving)
+
+    route_match_ndo = route_match.transpose(1, 0, 2)  # (n_nodes, n_dests, max_out)
+    routed = node_arriving[:, :, None] * route_match_ndo
+
+    flat_lids = safe_outlinks.reshape(-1)
+    flat_valid = outlink_valid.reshape(-1)
+    flat_routed = routed.transpose(0, 2, 1).reshape(-1, n_dests)
+    flat_routed = flat_routed * flat_valid[:, None]
+
+    inflow_d = jnp.zeros((n_links, n_dests), dtype=jnp.float32)
+    inflow_d = inflow_d.at[flat_lids].add(flat_routed)
+
+    # Step 6: Update per-dest current cumulative counts
+    new_cum_arr_d_cur = carry.cum_arrival_d_cur + dt * inflow_d
+    new_cum_dep_d_cur = carry.cum_departure_d_cur + dt * outflow_d
+
+    # Aggregate from per-dest -> update full arrays
+    new_cum_arr = jnp.sum(new_cum_arr_d_cur, axis=1)
+    new_cum_dep = jnp.sum(new_cum_dep_d_cur, axis=1)
+
+    new_carry = AoNFwdCarry(
+        cum_arrival=carry.cum_arrival.at[:, t_index + 1].set(new_cum_arr),
+        cum_departure=carry.cum_departure.at[:, t_index + 1].set(new_cum_dep),
+        demand_queue=new_dq,
+        absorbed_count=new_absorbed,
+        cum_arrival_d_cur=new_cum_arr_d_cur,
+        cum_departure_d_cur=new_cum_dep_d_cur,
+        demand_queue_history=carry.demand_queue_history.at[:, t_index].set(new_dq),
+    )
+
+    # No per-step output -- everything is in the carry
+    return new_carry, None
+
+
+def _build_state_aon_fwd(final_carry, config, next_link_ids):
+    """Build SimState from AoN forward-only scan results.
+
+    Per-destination cumulative arrays are set to minimal dummies since
+    they are not needed for total_travel_time / trip_completed and
+    would consume O(n_links * n_dests * tsize) memory.
+
+    Parameters
+    ----------
+    final_carry : AoNFwdCarry
+    config : NetworkConfig
+    next_link_ids : jnp.ndarray, (n_dests, n_nodes)
+
+    Returns
+    -------
+    SimState
+    """
+    n_dests = max(config.n_dests, 1)
+
+    return SimState(
+        cum_arrival=final_carry.cum_arrival,
+        cum_departure=final_carry.cum_departure,
+        demand_queue=final_carry.demand_queue,
+        absorbed_count=final_carry.absorbed_count,
+        demand_queue_history=final_carry.demand_queue_history,
+        cum_arrival_d=jnp.zeros((config.n_links, n_dests, 1), dtype=jnp.float32),
+        cum_departure_d=jnp.zeros((config.n_links, n_dests, 1), dtype=jnp.float32),
+        prev_next_link_ids=next_link_ids,
+    )
+
+
+def simulate_aon(params, config, differentiable=True):
+    """Run AON simulation with routes fixed at free-flow shortest paths.
+
+    Per-destination tracking is maintained internally so that traffic is
+    correctly absorbed at destination nodes.
+
+    When ``differentiable=False``, uses a memory-optimized forward-only
+    path that eliminates per-destination arrays from scan outputs,
+    reducing memory from O(tsize * n_links * n_dests) to
+    O(tsize * n_links).  The returned SimState has minimal dummy arrays
+    for ``cum_arrival_d`` / ``cum_departure_d``.
+
+    When ``differentiable=True``, falls back to ``simulate_duo`` with
+    routes frozen at t=0.
+
+    Parameters
+    ----------
+    params : Params
+    config : NetworkConfig
+    differentiable : bool, optional
+        If True (default), supports jax.grad w.r.t. params.
+        If False, use memory-optimized forward-only evaluation.
+
+    Returns
+    -------
+    SimState
+    """
+    if differentiable:
+        # Fall back to DUO with routes frozen at t=0.
+        config_aon = config._replace(route_update_interval=config.tsize + 1)
+        return simulate_duo(params, config_aon, differentiable=True)
+
+    # --- Memory-optimized forward-only path ---
+    link_state = compute_link_state(params, config)
+    n_dests = config.n_dests
+
+    # Precompute free-flow travel times and run Bellman-Ford once
+    ff_tt = config.link_lengths / params.u  # free-flow travel time
+    _, bf_preds = bellman_ford_all_dests(ff_tt, config)
+    next_link_ids = bf_preds  # (n_dests, n_nodes) int32
+
+    # Precompute route_match (static for entire simulation)
+    safe_outlinks = jnp.maximum(config.node_outlinks, 0)  # (n_nodes, max_out)
+    outlink_valid = config.node_outlinks >= 0  # (n_nodes, max_out)
+    route_match = (
+        (next_link_ids[:, :, None] == safe_outlinks[None, :, :])
+        & outlink_valid[None, :, :]
+    ).astype(jnp.float32)  # (n_dests, n_nodes, max_out)
+
+    # Compact OD demand: only origin nodes to save memory
+    # od_demand_rate (n_nodes, n_dests, tsize) -> od_seq (tsize, n_origins, n_dests)
+    is_origin_np = np.asarray(config.node_type) == 0
+    origin_ids_np = np.nonzero(is_origin_np)[0]
+    n_origins = len(origin_ids_np)
+    origin_ids = jnp.array(origin_ids_np, dtype=jnp.int32)
+    od_compact = params.od_demand_rate[origin_ids, :n_dests, :]
+    # Transpose to (tsize, n_origins, n_dests) for sequential scan input
+    od_seq = jnp.transpose(od_compact, (2, 0, 1))
+    del od_compact  # free intermediate
+
+    # Create slim params with od_demand_rate zeroed to free memory
+    slim_params = params._replace(
+        od_demand_rate=jnp.zeros((config.n_nodes, 1, 1), dtype=jnp.float32))
+
+    # Initialize minimal carry (demand_queue_history in carry, not output)
+    init_carry = AoNFwdCarry(
+        cum_arrival=jnp.zeros((config.n_links, config.tsize + 1),
+                               dtype=jnp.float32),
+        cum_departure=jnp.zeros((config.n_links, config.tsize + 1),
+                                 dtype=jnp.float32),
+        demand_queue=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+        absorbed_count=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+        cum_arrival_d_cur=jnp.zeros((config.n_links, n_dests),
+                                     dtype=jnp.float32),
+        cum_departure_d_cur=jnp.zeros((config.n_links, n_dests),
+                                       dtype=jnp.float32),
+        demand_queue_history=jnp.zeros((config.n_nodes, config.tsize),
+                                        dtype=jnp.float32),
+    )
+
+    step_fn = functools.partial(
+        _aon_simulation_step_fwd,
+        params=slim_params, link_state=link_state, config=config,
+        route_match=route_match, origin_ids=origin_ids)
+    scan_inputs = (jnp.arange(config.tsize), od_seq)
+    final_carry, _ = jax.lax.scan(step_fn, init_carry, scan_inputs)
+
+    return _build_state_aon_fwd(final_carry, config, next_link_ids)
 
 
 # ================================================================
@@ -1286,37 +2121,239 @@ def duo_simulation_step(carry, t_index, params, link_state, config):
     return new_carry, output
 
 
-def simulate_duo(params, config):
-    """Run DUO simulation. Differentiable w.r.t. params.
+def duo_simulation_step_fwd(carry, t_index, params, link_state, config):
+    """One DUO timestep for forward-only jax.lax.scan (full-array carry).
+
+    Uses absolute ``t_index`` into full-history arrays instead of a sliding
+    window.  Otherwise identical to ``duo_simulation_step``.
+
+    Parameters
+    ----------
+    carry : FwdCarry
+    t_index : jnp scalar int (absolute timestep index)
+    params : Params
+    link_state : LinkState
+    config : NetworkConfig
+
+    Returns
+    -------
+    (new_carry, StepOutput)
+    """
+    dt = config.deltat
+    n_links = config.n_links
+    n_nodes = config.n_nodes
+    n_dests = config.n_dests
+
+    # Build SimState view backed by full-history arrays
+    state = _make_state_from_fwd_carry(carry, config)
+
+    # Step 1: LTM demands/supplies (absolute t_index)
+    demands = compute_demands(t_index, state, link_state, params, config)
+    supplies = compute_supplies(t_index, state, link_state, params, config)
+
+    # Step 2: Instantaneous travel times (absolute t_index)
+    link_tt = compute_instantaneous_tt(t_index, state, link_state, params, config,
+                                       method=config.tt_method)
+
+    # Step 2b: Add congestion pricing toll for generalized cost
+    toll_step = jnp.minimum(
+        t_index // config.toll_step_size,
+        config.n_toll_steps - 1
+    )
+    current_toll = params.toll[:, toll_step]
+    link_cost = link_tt + current_toll
+
+    # Step 3: Bellman-Ford shortest paths (recomputed every route_update_interval steps)
+    should_update = (t_index % config.route_update_interval) == 0
+    bf_dists, bf_preds = jax.lax.cond(
+        should_update,
+        lambda _: bellman_ford_all_dests(link_cost, config),
+        lambda _: (carry.prev_dists, carry.prev_next_link_ids),
+        None,
+    )
+    next_link_ids = bf_preds  # (n_dests, n_nodes) int32
+    dists = bf_dists           # (n_dests, n_nodes) float32
+    if not config.use_logit:
+        dists = jax.lax.stop_gradient(dists)
+
+    # Step 4: Dynamic diverge ratios -- vectorized tensor operations
+    n_on_d = carry.cum_arrival_d_cur - carry.cum_departure_d_cur  # (n_links, n_dests)
+    n_on_d = jnp.maximum(n_on_d, 0.0)
+
+    is_origin = config.node_type == 0  # (n_nodes,)
+
+    # Gather inlink vehicle counts per node: (n_nodes, max_in, n_dests)
+    safe_inlinks = jnp.maximum(config.node_inlinks, 0)  # (n_nodes, max_in)
+    inlink_valid = config.node_inlinks >= 0  # (n_nodes, max_in)
+    inlink_veh = n_on_d[safe_inlinks]  # (n_nodes, max_in, n_dests)
+    inlink_veh = inlink_veh * inlink_valid[:, :, None]  # mask invalid
+    node_inlink_total = jnp.sum(inlink_veh, axis=1)  # (n_nodes, n_dests)
+
+    # For origins: use OD demand as weight
+    od_weights = params.od_demand_rate[:, :n_dests, t_index]  # (n_nodes, n_dests)
+    dest_weight = jnp.where(is_origin[:, None], od_weights, node_inlink_total)  # (n_nodes, n_dests)
+
+    # Build route indicator
+    safe_outlinks = jnp.maximum(config.node_outlinks, 0)  # (n_nodes, max_out)
+    outlink_valid = config.node_outlinks >= 0  # (n_nodes, max_out)
+
+    if config.use_logit:
+        # Soft logit routing: cost_via_outlink = link_cost + dist_to_dest_from_end_node
+        outlink_end_nodes = config.link_end_node[safe_outlinks]  # (n_nodes, max_out)
+        safe_end_nodes = jnp.maximum(outlink_end_nodes, 0)
+        dist_from_end = dists[:, safe_end_nodes]  # (n_dests, n_nodes, max_out)
+        cost_via = link_cost[safe_outlinks][None, :, :] + dist_from_end  # (n_dests, n_nodes, max_out)
+        INF = 1e15
+        cost_via = jnp.where(outlink_valid[None, :, :], cost_via, INF)
+        logits = -cost_via / config.logit_temperature
+        has_outlinks = config.node_n_outlinks > 0  # (n_nodes,)
+        logits = jnp.where(
+            ~has_outlinks[None, :, None],
+            0.0,
+            jnp.where(outlink_valid[None, :, :], logits, -INF))
+        route_match = jax.nn.softmax(logits, axis=-1)  # (n_dests, n_nodes, max_out)
+    else:
+        # Hard routing: route_match[d, n, o] = (next_link_ids[d, n] == outlinks[n, o])
+        route_match = (next_link_ids[:, :, None] == safe_outlinks[None, :, :]) & outlink_valid[None, :, :]
+        route_match = route_match.astype(jnp.float32)
+
+    # outlink_flow[n, o] = sum_d dest_weight[n, d] * route_match[d, n, o]
+    outlink_flow = jnp.einsum("nd,dno->no", dest_weight, route_match)
+
+    total = jnp.sum(outlink_flow, axis=1, keepdims=True)  # (n_nodes, 1)
+    n_out = config.node_n_outlinks[:, None]  # (n_nodes, 1)
+    equal_split = jnp.where(
+        jnp.arange(config.max_out)[None, :] < n_out,
+        1.0 / jnp.maximum(n_out, 1), 0.0)  # (n_nodes, max_out)
+    duo_diverge = jnp.where(total > 1e-10, outlink_flow / jnp.maximum(total, 1e-10), equal_split)
+
+    # Override diverge_ratios in params for this step
+    duo_tf = jnp.broadcast_to(duo_diverge[:, None, :],
+                               (n_nodes, config.max_in, config.max_out))
+    params_duo = params._replace(diverge_ratios=duo_diverge, turning_fractions=duo_tf)
+
+    # Step 5: Node models -> aggregate outflow/inflow (absolute t_index for demand_rate)
+    inflows, outflows, new_dq, _ = compute_node_transfers(
+        t_index, demands, supplies, state, params_duo, config)
+
+    # Step 6: FIFO allocation of departures by destination
+    total_arr = carry.cum_arrival[:, t_index]  # (n_links,)
+    arr_d = carry.cum_arrival_d_cur  # (n_links, n_dests)
+    fifo_ratio = jnp.where(
+        total_arr[:, None] > 1e-10,
+        arr_d / jnp.maximum(total_arr[:, None], 1e-10),
+        0.0)  # (n_links, n_dests)
+    outflow_d = outflows[:, None] * fifo_ratio  # (n_links, n_dests)
+
+    # Step 7: Route per-dest traffic -- vectorized tensor operations
+    new_absorbed = carry.absorbed_count
+
+    inlink_outflow_d = outflow_d[safe_inlinks]  # (n_nodes, max_in, n_dests)
+    inlink_outflow_d = inlink_outflow_d * inlink_valid[:, :, None]
+    node_arriving = jnp.sum(inlink_outflow_d, axis=1)  # (n_nodes, n_dests)
+
+    # Add OD demand at origins
+    node_arriving = node_arriving + jnp.where(
+        is_origin[:, None], od_weights, 0.0)
+
+    # Absorb at destinations
+    dest_mask = (config.dest_node_ids[None, :] == jnp.arange(n_nodes)[:, None])  # (n_nodes, n_dests)
+    absorb_per_node = jnp.sum(jnp.where(dest_mask, node_arriving, 0.0), axis=1)  # (n_nodes,)
+    new_absorbed = new_absorbed + absorb_per_node * dt
+    node_arriving = jnp.where(dest_mask, 0.0, node_arriving)
+
+    # Route to outlinks via routing probabilities
+    route_match_ndo = route_match.transpose(1, 0, 2)  # (n_nodes, n_dests, max_out)
+    routed = node_arriving[:, :, None] * route_match_ndo
+
+    flat_lids = safe_outlinks.reshape(-1)
+    flat_valid = outlink_valid.reshape(-1)
+    flat_routed = routed.transpose(0, 2, 1).reshape(-1, n_dests)
+    flat_routed = flat_routed * flat_valid[:, None]
+
+    inflow_d = jnp.zeros((n_links, n_dests), dtype=jnp.float32)
+    inflow_d = inflow_d.at[flat_lids].add(flat_routed)
+
+    # Step 8: Update per-dest current cumulative counts
+    new_cum_arr_d_cur = carry.cum_arrival_d_cur + dt * inflow_d
+    new_cum_dep_d_cur = carry.cum_departure_d_cur + dt * outflow_d
+
+    # Aggregate from per-dest -> update full arrays at t_index + 1
+    new_cum_arr = jnp.sum(new_cum_arr_d_cur, axis=1)
+    new_cum_dep = jnp.sum(new_cum_dep_d_cur, axis=1)
+
+    new_carry = FwdCarry(
+        cum_arrival=carry.cum_arrival.at[:, t_index + 1].set(new_cum_arr),
+        cum_departure=carry.cum_departure.at[:, t_index + 1].set(new_cum_dep),
+        demand_queue=new_dq,
+        absorbed_count=new_absorbed,
+        cum_arrival_d_cur=new_cum_arr_d_cur,
+        cum_departure_d_cur=new_cum_dep_d_cur,
+        prev_next_link_ids=next_link_ids,
+        prev_dists=dists,
+    )
+
+    # DUO: per-dest aggregate is authoritative (may differ from node model aggregate)
+    output = StepOutput(
+        inflow_rates=jnp.sum(inflow_d, axis=1),
+        outflow_rates=jnp.sum(outflow_d, axis=1),
+        demand_queue=new_dq,
+        inflow_d=inflow_d,
+        outflow_d=outflow_d,
+    )
+    return new_carry, output
+
+
+def simulate_duo(params, config, differentiable=True):
+    """Run DUO simulation.
 
     Parameters
     ----------
     params : Params
     config : NetworkConfig
+    differentiable : bool, optional
+        If True (default), use windowed carry suitable for jax.grad.
+        If False, use full-array carry for faster forward-only evaluation
+        (not compatible with reverse-mode AD).
 
     Returns
     -------
     SimState
     """
     link_state = compute_link_state(params, config)
-    W = config.window_size
     n_dests = config.n_dests
 
-    init_carry = ScanCarry(
-        cum_arrival_w=jnp.zeros((config.n_links, W + 1), dtype=jnp.float32),
-        cum_departure_w=jnp.zeros((config.n_links, W + 1), dtype=jnp.float32),
-        demand_queue=jnp.zeros(config.n_nodes, dtype=jnp.float32),
-        absorbed_count=jnp.zeros(config.n_nodes, dtype=jnp.float32),
-        cum_arrival_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
-        cum_departure_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
-        prev_next_link_ids=jnp.full((n_dests, config.n_nodes), -1, dtype=jnp.int32),
-        prev_dists=jnp.full((n_dests, config.n_nodes), 1e15, dtype=jnp.float32),
-    )
-
-    step_fn = functools.partial(duo_simulation_step,
-                                params=params, link_state=link_state, config=config)
-    final_carry, outputs = jax.lax.scan(step_fn, init_carry, jnp.arange(config.tsize))
-    return _reconstruct_state(final_carry, outputs, config)
+    if differentiable:
+        W = config.window_size
+        init_carry = ScanCarry(
+            cum_arrival_w=jnp.zeros((config.n_links, W + 1), dtype=jnp.float32),
+            cum_departure_w=jnp.zeros((config.n_links, W + 1), dtype=jnp.float32),
+            demand_queue=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+            absorbed_count=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+            cum_arrival_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+            cum_departure_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+            prev_next_link_ids=jnp.full((n_dests, config.n_nodes), -1, dtype=jnp.int32),
+            prev_dists=jnp.full((n_dests, config.n_nodes), 1e15, dtype=jnp.float32),
+        )
+        step_fn = functools.partial(duo_simulation_step,
+                                    params=params, link_state=link_state, config=config)
+        final_carry, outputs = jax.lax.scan(step_fn, init_carry, jnp.arange(config.tsize))
+        return _reconstruct_state(final_carry, outputs, config)
+    else:
+        init_carry = FwdCarry(
+            cum_arrival=jnp.zeros((config.n_links, config.tsize + 1), dtype=jnp.float32),
+            cum_departure=jnp.zeros((config.n_links, config.tsize + 1), dtype=jnp.float32),
+            demand_queue=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+            absorbed_count=jnp.zeros(config.n_nodes, dtype=jnp.float32),
+            cum_arrival_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+            cum_departure_d_cur=jnp.zeros((config.n_links, n_dests), dtype=jnp.float32),
+            prev_next_link_ids=jnp.full((n_dests, config.n_nodes), -1, dtype=jnp.int32),
+            prev_dists=jnp.full((n_dests, config.n_nodes), 1e15, dtype=jnp.float32),
+        )
+        step_fn = functools.partial(duo_simulation_step_fwd,
+                                    params=params, link_state=link_state, config=config)
+        final_carry, outputs = jax.lax.scan(step_fn, init_carry, jnp.arange(config.tsize))
+        return _build_state_fwd(final_carry, outputs, config)
 
 
 # ================================================================

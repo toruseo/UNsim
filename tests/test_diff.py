@@ -1,6 +1,7 @@
 """
 Tests for the JAX differentiable LTM simulator (unsim_diff.py).
-Verifies numerical agreement with unsim.py and gradient computation.
+Verifies numerical agreement with unsim.py, gradient computation,
+and AD vs finite-difference regression.
 
 Requires JAX to be installed. Skipped if JAX is unavailable.
 """
@@ -18,9 +19,9 @@ except (ImportError, RuntimeError):
 
 from unsim import World, equal_tolerance
 from unsim.unsim_diff import (
-    world_to_jax, simulate, total_travel_time, trip_completed,
+    world_to_jax, simulate, simulate_duo, total_travel_time, trip_completed,
     average_travel_time, compute_N, invert_interp_1d, link_exit_time,
-    travel_time, NetworkConfig, Params, SimState,
+    travel_time, travel_time_auto, NetworkConfig, Params, SimState,
 )
 
 
@@ -594,13 +595,11 @@ class TestTravelTime:
 
         1 link free flow, t_enter=10. t_freeflow = t_queue = 60 (tie).
         jnp.maximum at tie gives 50/50 gradient split.
-        Additionally, in simulate, jnp.maximum(D, 0) at D=0 (step k=9)
-        also gives 50/50, halving d(cum_departure)/d(u).
+        In simulate, jnp.maximum(D, 0) at D=0 (step k=9) also gives
+        50/50, halving d(cum_departure)/d(u).  But the straight-through
+        clip in invert_interp_1d prevents further halving of d(t_queue).
 
-        Theory:
-          d(t_freeflow)/d(u) = -d/u^2 = -2.5  (direct)
-          d(t_queue)/d(u) = -1.25              (halved by D=0 tie in simulate)
-          total = 0.5*(-2.5) + 0.5*(-1.25) = -1.875
+        AD gradient verified against central finite differences.
         """
         W = World(name="", deltat=5, tmax=2000, print_mode=0)
         W.addNode("orig", 0, 0)
@@ -616,6 +615,255 @@ class TestTravelTime:
 
         grads = jax.grad(loss_full)(params)
         ad_grad = float(grads.u[0])
-        expected = 0.5 * (-2.5) + 0.5 * (-1.25)  # -1.875
-        assert abs(ad_grad - expected) < 0.1, \
-            f"AD={ad_grad:.4f}, theory={expected:.4f}"
+
+        # Finite-difference reference
+        eps = 1e-4
+        u0 = float(params.u[0])
+        pp = params._replace(u=params.u.at[0].set(u0 + eps))
+        pm = params._replace(u=params.u.at[0].set(u0 - eps))
+        fd_grad = (float(loss_full(pp)) - float(loss_full(pm))) / (2 * eps)
+
+        assert abs(ad_grad - fd_grad) / max(abs(fd_grad), 1.0) < 0.15, \
+            f"AD={ad_grad:.4f}, FD={fd_grad:.4f}"
+
+
+# ================================================================
+# AD vs Finite-Difference regression tests
+# ================================================================
+
+_REG_REL_TOL = 0.20
+_REG_ABS_TOL = 0.1
+_FD_DELTA = 1e-3
+
+
+def _check_reg(actual, expected, label=""):
+    """Assert actual matches expected within rel_tol=20% or abs_tol=0.1."""
+    diff = abs(actual - expected)
+    if abs(expected) > _REG_ABS_TOL:
+        ok = diff / abs(expected) < _REG_REL_TOL or diff < _REG_ABS_TOL
+    else:
+        ok = diff < _REG_ABS_TOL
+    assert ok, (
+        f"{label}: actual={actual:.6f}, expected={expected:.6f}, "
+        f"diff={diff:.6f}")
+
+
+def _build_merge_regression():
+    W = World(name="", deltat=5, tmax=2000, print_mode=0)
+    W.addNode("orig1", 0, 0); W.addNode("orig2", 0, 2)
+    W.addNode("merge", 1, 1); W.addNode("dest", 2, 1)
+    W.addLink("link1", "orig1", "merge", length=1000,
+              free_flow_speed=20, jam_density=0.2, merge_priority=1)
+    W.addLink("link2", "orig2", "merge", length=1000,
+              free_flow_speed=20, jam_density=0.2, merge_priority=1)
+    W.addLink("link3", "merge", "dest", length=1000,
+              free_flow_speed=20, jam_density=0.2)
+    W.adddemand("orig1", "dest", 0, 1000, 0.45)
+    W.adddemand("orig2", "dest", 400, 1000, 0.6)
+    return W
+
+
+class TestMergeAD:
+    """AD gradient regression for merge scenario."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def setup(self, request):
+        W = _build_merge_regression()
+        params, config = world_to_jax(W)
+        request.cls.params = params
+        request.cls.config = config
+        request.cls.mp1_base = params.merge_priority[0]
+
+    def test_ad_demand_orig1(self):
+        p, c = self.params, self.config
+        grad = jax.grad(lambda dr: total_travel_time(
+            simulate(p._replace(demand_rate=dr), c), c))(p.demand_rate)
+        _check_reg(float(jnp.sum(grad[0])), 437453.62, "demand_orig1")
+
+    def test_ad_demand_orig2(self):
+        p, c = self.params, self.config
+        grad = jax.grad(lambda dr: total_travel_time(
+            simulate(p._replace(demand_rate=dr), c), c))(p.demand_rate)
+        _check_reg(float(jnp.sum(grad[1])), 421502.56, "demand_orig2")
+
+    def test_ad_speed_link1(self):
+        p, c = self.params, self.config
+        grad = jax.grad(lambda u: total_travel_time(
+            simulate(p._replace(u=u), c), c))(p.u)
+        _check_reg(float(grad[0]), -1278.28, "speed_link1")
+
+    def test_ad_speed_link2(self):
+        p, c = self.params, self.config
+        grad = jax.grad(lambda u: total_travel_time(
+            simulate(p._replace(u=u), c), c))(p.u)
+        _check_reg(float(grad[1]), -616.88, "speed_link2")
+
+    def test_ad_speed_link3(self):
+        p, c = self.params, self.config
+        grad = jax.grad(lambda u: total_travel_time(
+            simulate(p._replace(u=u), c), c))(p.u)
+        _check_reg(float(grad[2]), -2024.69, "speed_link3")
+
+    def test_ad_linkTTT_link1(self):
+        p, c, mp1 = self.params, self.config, self.mp1_base
+        def fn(m):
+            s = simulate(p._replace(
+                merge_priority=p.merge_priority.at[0].set(m)), c)
+            n = s.cum_arrival[:, :c.tsize] - s.cum_departure[:, :c.tsize]
+            return jnp.sum(n, axis=1) * c.deltat
+        _check_reg(float(jax.jacfwd(fn)(mp1)[0]), -45900.04, "linkTTT_link1")
+
+    def test_ad_linkTTT_link2(self):
+        p, c, mp1 = self.params, self.config, self.mp1_base
+        def fn(m):
+            s = simulate(p._replace(
+                merge_priority=p.merge_priority.at[0].set(m)), c)
+            n = s.cum_arrival[:, :c.tsize] - s.cum_departure[:, :c.tsize]
+            return jnp.sum(n, axis=1) * c.deltat
+        _check_reg(float(jax.jacfwd(fn)(mp1)[1]), 40725.04, "linkTTT_link2")
+
+    def test_ad_odTT_orig1_t100(self):
+        p, c, mp1 = self.params, self.config, self.mp1_base
+        def fn(m):
+            pp = p._replace(merge_priority=p.merge_priority.at[0].set(m))
+            return travel_time_auto(0, 3, 100.0, simulate(pp, c), pp, c)
+        _check_reg(float(jax.grad(fn)(mp1)), 0.0, "odTT_orig1_t100")
+
+    def test_ad_odTT_orig2_t500(self):
+        p, c, mp1 = self.params, self.config, self.mp1_base
+        def fn(m):
+            pp = p._replace(merge_priority=p.merge_priority.at[0].set(m))
+            return travel_time_auto(1, 3, 500.0, simulate(pp, c), pp, c)
+        _check_reg(float(jax.grad(fn)(mp1)), 75.0, "odTT_orig2_t500")
+
+
+class TestMergeFD:
+    """Finite-difference gradient regression for merge scenario."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def setup(self, request):
+        W = _build_merge_regression()
+        params, config = world_to_jax(W)
+        request.cls.params = params
+        request.cls.config = config
+        request.cls.mp1_base = float(params.merge_priority[0])
+
+    def _fd(self, fn):
+        return (fn(_FD_DELTA) - fn(-_FD_DELTA)) / (2 * _FD_DELTA)
+
+    def test_fd_demand_orig1(self):
+        p, c = self.params, self.config
+        def fn(d):
+            return float(total_travel_time(
+                simulate(p._replace(demand_rate=p.demand_rate.at[0,:].add(d)), c), c))
+        _check_reg(self._fd(fn), 448125.00, "fd_demand_orig1")
+
+    def test_fd_speed_link1(self):
+        p, c = self.params, self.config
+        def fn(d):
+            return float(total_travel_time(
+                simulate(p._replace(u=p.u.at[0].add(d)), c), c))
+        _check_reg(self._fd(fn), -1351.56, "fd_speed_link1")
+
+    def test_fd_odTT_orig2_t500(self):
+        p, c, mp1 = self.params, self.config, self.mp1_base
+        def fn(d):
+            pp = p._replace(merge_priority=p.merge_priority.at[0].set(mp1+d))
+            return float(travel_time_auto(1, 3, 500.0, simulate(pp, c), pp, c))
+        _check_reg(self._fd(fn), 75.04, "fd_odTT_orig2_t500")
+
+
+def _build_duo_regression():
+    W = World(name="", deltat=5, tmax=4000, print_mode=0,
+              route_choice="duo_logit")
+    W.LOGIT_TEMPERATURE = 60.0
+    W.addNode("orig", 0, 0); W.addNode("mid1", 1, 1)
+    W.addNode("mid2", 1, -1); W.addNode("dest", 2, 0)
+    W.addLink("fast1", "orig", "mid1", length=1000, free_flow_speed=20, capacity=0.8)
+    W.addLink("fast2", "mid1", "dest", length=500, free_flow_speed=20, capacity=0.6)
+    W.addLink("slow1", "orig", "mid2", length=1000, free_flow_speed=10, capacity=0.8)
+    W.addLink("slow2", "mid2", "dest", length=500, free_flow_speed=10, capacity=0.8)
+    W.adddemand("orig", "dest", 0, 3000, 0.6)
+    W.adddemand("orig", "dest", 500, 2000, 0.2)
+    return W
+
+
+class TestDuoAD:
+    """AD gradient regression for DUO logit scenario."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def setup(self, request):
+        W = _build_duo_regression()
+        params, config = world_to_jax(W)
+        li = {l.name: i for i, l in enumerate(W.LINKS)}
+        ni = {n.name: i for i, n in enumerate(W.NODES)}
+        request.cls.params = params
+        request.cls.config = config
+        request.cls.fast2_id = li["fast2"]
+        request.cls.orig_id = ni["orig"]
+        request.cls.dest_id = ni["dest"]
+        request.cls.fast_path = (li["fast1"], li["fast2"])
+        request.cls.cap0 = float(params.q_star[li["fast2"]])
+
+    def _replace_cap(self, cap):
+        return self.params._replace(
+            q_star=self.params.q_star.at[self.fast2_id].set(cap))
+
+    def test_ad_ttt_all(self):
+        g = float(jax.grad(lambda c: total_travel_time(
+            simulate_duo(self._replace_cap(c), self.config),
+            self.config))(self.cap0))
+        _check_reg(g, -586318.62, "ttt_all")
+
+    def test_ad_odTT_t1500(self):
+        def fn(c):
+            p = self._replace_cap(c)
+            return travel_time_auto(self.orig_id, self.dest_id,
+                                    1500.0, simulate_duo(p, self.config), p, self.config)
+        _check_reg(float(jax.grad(fn)(self.cap0)), -570.35, "odTT_t1500")
+
+    def test_ad_pathTT_fast_t1500(self):
+        def fn(c):
+            p = self._replace_cap(c)
+            return travel_time(self.fast_path, 1500.0,
+                               simulate_duo(p, self.config), p, self.config)
+        _check_reg(float(jax.grad(fn)(self.cap0)), -570.35, "pathTT_fast_t1500")
+
+
+class TestDuoFD:
+    """Finite-difference gradient regression for DUO logit scenario."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def setup(self, request):
+        W = _build_duo_regression()
+        params, config = world_to_jax(W)
+        li = {l.name: i for i, l in enumerate(W.LINKS)}
+        ni = {n.name: i for i, n in enumerate(W.NODES)}
+        request.cls.params = params
+        request.cls.config = config
+        request.cls.fast2_id = li["fast2"]
+        request.cls.orig_id = ni["orig"]
+        request.cls.dest_id = ni["dest"]
+        request.cls.fast_path = (li["fast1"], li["fast2"])
+        request.cls.cap0 = float(params.q_star[li["fast2"]])
+
+    def _replace_cap(self, cap):
+        return self.params._replace(
+            q_star=self.params.q_star.at[self.fast2_id].set(cap))
+
+    def _fd(self, fn):
+        return (fn(self.cap0+_FD_DELTA) - fn(self.cap0-_FD_DELTA)) / (2*_FD_DELTA)
+
+    def test_fd_ttt_all(self):
+        def fn(c):
+            return float(total_travel_time(
+                simulate_duo(self._replace_cap(c), self.config), self.config))
+        _check_reg(self._fd(fn), -585710.94, "fd_ttt_all")
+
+    def test_fd_odTT_t1500(self):
+        def fn(c):
+            p = self._replace_cap(c)
+            return float(travel_time_auto(
+                self.orig_id, self.dest_id, 1500.0,
+                simulate_duo(p, self.config), p, self.config))
+        _check_reg(self._fd(fn), -570.13, "fd_odTT_t1500")

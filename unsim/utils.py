@@ -1,5 +1,5 @@
 """
-General utilities for UNsim.
+General utilities for UXsim.
 """
 
 import warnings

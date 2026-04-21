@@ -1,7 +1,10 @@
 """
-Verifies UNsim outputs for merging/diverging nodes in various configurations.
+Verifies UNsim outputs for merging/diverging/INM nodes in various configurations.
 Tests check theoretical flow rates using equal_tolerance against cumulative
 departure rates and Edie state.
+
+Also covers manual diverge_ratio / absorption_ratio specification
+and Incremental Node Model (INM) based on Floetteroed & Rohde (2011).
 """
 
 import pytest
@@ -447,3 +450,215 @@ def test_flow_conservation_diverge():
         outflow = link1.cum_departure[t]
         inflow = link2.cum_arrival[t] + link3.cum_arrival[t]
         assert abs(outflow - inflow) < 1e-6, f"Flow conservation violated at t={t}"
+
+
+# ================================================================
+# Manual diverge_ratio / absorption_ratio
+# ================================================================
+
+def _avg_outflow(link, t1, t2):
+    dt = link.W.DELTAT
+    i1 = max(0, min(int(t1/dt), len(link.cum_departure)-1))
+    i2 = max(0, min(int(t2/dt), len(link.cum_departure)-1))
+    if i2 <= i1:
+        return 0
+    return (link.cum_departure[i2] - link.cum_departure[i1]) / ((i2-i1)*dt)
+
+def _avg_inflow(link, t1, t2):
+    dt = link.W.DELTAT
+    i1 = max(0, min(int(t1/dt), len(link.cum_arrival)-1))
+    i2 = max(0, min(int(t2/dt), len(link.cum_arrival)-1))
+    if i2 <= i1:
+        return 0
+    return (link.cum_arrival[i2] - link.cum_arrival[i1]) / ((i2-i1)*dt)
+
+
+def test_manual_diverge_equal_split():
+    """Manual diverge_ratio: 50/50 split."""
+    W = World(deltat=5, tmax=1200, print_mode=0)
+    W.addNode("orig", 0, 0)
+    W.addNode("mid", 1, 1, diverge_ratio={"link2": 0.5, "link3": 0.5})
+    W.addNode("dest1", 2, 0)
+    W.addNode("dest2", 2, 2)
+    W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.addLink("link2", "mid", "dest1", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.addLink("link3", "mid", "dest2", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.adddemand("orig", "dest1", 0, 1000, 0.6)
+    W.exec_simulation()
+    assert equal_tolerance(_avg_inflow(W.get_link("link2"), 200, 800), 0.3)
+    assert equal_tolerance(_avg_inflow(W.get_link("link3"), 200, 800), 0.3)
+
+
+def test_manual_diverge_unequal_split():
+    """Manual diverge_ratio: 30/70 split."""
+    W = World(deltat=5, tmax=1200, print_mode=0)
+    W.addNode("orig", 0, 0)
+    W.addNode("mid", 1, 1, diverge_ratio={"link2": 0.3, "link3": 0.7})
+    W.addNode("dest1", 2, 0)
+    W.addNode("dest2", 2, 2)
+    W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.addLink("link2", "mid", "dest1", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.addLink("link3", "mid", "dest2", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.adddemand("orig", "dest1", 0, 1000, 0.6)
+    W.exec_simulation()
+    assert equal_tolerance(_avg_inflow(W.get_link("link2"), 200, 800), 0.18)
+    assert equal_tolerance(_avg_inflow(W.get_link("link3"), 200, 800), 0.42)
+
+
+def test_manual_diverge_supply_constrained():
+    """Manual diverge with capacity_in causing congestion."""
+    W = World(deltat=5, tmax=1200, print_mode=0)
+    W.addNode("orig", 0, 0)
+    W.addNode("mid", 1, 1, diverge_ratio={"link2": 0.5, "link3": 0.5})
+    W.addNode("dest1", 2, 0)
+    W.addNode("dest2", 2, 2)
+    W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.addLink("link2", "mid", "dest1", length=1000, free_flow_speed=20, jam_density=0.2, capacity_in=0.2)
+    W.addLink("link3", "mid", "dest2", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.adddemand("orig", "dest1", 0, 1000, 0.6)
+    W.exec_simulation()
+    assert equal_tolerance(_avg_outflow(W.get_link("link1"), 200, 800), 0.4)
+    assert equal_tolerance(_avg_inflow(W.get_link("link2"), 200, 800), 0.2)
+
+
+def test_manual_diverge_flow_conservation():
+    """Flow conservation at diverge node with manual ratios."""
+    W = World(deltat=5, tmax=1200, print_mode=0)
+    W.addNode("orig", 0, 0)
+    W.addNode("mid", 1, 1, diverge_ratio={"link2": 0.4, "link3": 0.6})
+    W.addNode("dest1", 2, 0)
+    W.addNode("dest2", 2, 2)
+    link1 = W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+    link2 = W.addLink("link2", "mid", "dest1", length=1000, free_flow_speed=20, jam_density=0.2)
+    link3 = W.addLink("link3", "mid", "dest2", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.adddemand("orig", "dest1", 0, 1000, 0.7)
+    W.exec_simulation()
+    for t in range(W.TSIZE + 1):
+        assert abs(link1.cum_departure[t] - link2.cum_arrival[t] - link3.cum_arrival[t]) < 1e-6
+
+
+def test_absorption_full():
+    """absorption_ratio=1.0: all traffic absorbed at intermediate node."""
+    W = World(deltat=5, tmax=2000, print_mode=0)
+    W.addNode("orig", 0, 0)
+    W.addNode("mid", 1, 1, absorption_ratio=1.0)
+    W.addNode("dest", 2, 2)
+    link1 = W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+    link2 = W.addLink("link2", "mid", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.adddemand("orig", "mid", 0, 500, 0.5)
+    W.exec_simulation()
+    assert link2.cum_arrival[-1] < 0.1
+    assert equal_tolerance(link1.cum_departure[-1], 250)
+
+
+def test_absorption_partial():
+    """absorption_ratio=0.5: half absorbed, half passes through."""
+    W = World(deltat=5, tmax=1200, print_mode=0)
+    W.addNode("orig", 0, 0)
+    W.addNode("mid", 1, 1, absorption_ratio=0.5)
+    W.addNode("dest", 2, 2)
+    link1 = W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+    link2 = W.addLink("link2", "mid", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+    W.adddemand("orig", "dest", 0, 1000, 0.4)
+    W.exec_simulation()
+    assert equal_tolerance(_avg_outflow(link1, 200, 800), 0.4)
+    assert equal_tolerance(_avg_inflow(link2, 200, 800), 0.2)
+
+
+def test_manual_vs_auto_diverge():
+    """Manual diverge_ratio={0.5, 0.5} matches auto_diverge with equal demands."""
+    W1 = World(deltat=5, tmax=1200, print_mode=0)
+    W1.addNode("o", 0, 0)
+    W1.addNode("m", 1, 1, diverge_ratio={"l2": 0.5, "l3": 0.5})
+    W1.addNode("d1", 2, 0); W1.addNode("d2", 2, 2)
+    W1.addLink("l1", "o", "m", length=1000, free_flow_speed=20, jam_density=0.2)
+    W1.addLink("l2", "m", "d1", length=1000, free_flow_speed=20, jam_density=0.2)
+    W1.addLink("l3", "m", "d2", length=1000, free_flow_speed=20, jam_density=0.2)
+    W1.adddemand("o", "d1", 0, 1000, 0.3); W1.adddemand("o", "d2", 0, 1000, 0.3)
+    W1.exec_simulation(); W1.analyzer.basic_analysis()
+
+    W2 = World(deltat=5, tmax=1200, print_mode=0, auto_diverge=True)
+    W2.addNode("o", 0, 0); W2.addNode("m", 1, 1)
+    W2.addNode("d1", 2, 0); W2.addNode("d2", 2, 2)
+    W2.addLink("l1", "o", "m", length=1000, free_flow_speed=20, jam_density=0.2)
+    W2.addLink("l2", "m", "d1", length=1000, free_flow_speed=20, jam_density=0.2)
+    W2.addLink("l3", "m", "d2", length=1000, free_flow_speed=20, jam_density=0.2)
+    W2.adddemand("o", "d1", 0, 1000, 0.3); W2.adddemand("o", "d2", 0, 1000, 0.3)
+    W2.exec_simulation(); W2.analyzer.basic_analysis()
+
+    assert equal_tolerance(W1.analyzer.total_travel_time, W2.analyzer.total_travel_time)
+
+
+# ================================================================
+# INM (Incremental Node Model) - Floetteroed & Rohde (2011)
+# ================================================================
+
+def _build_flotterod(W, sw_capacity=None):
+    """Build Floetteroed 3x3 intersection scenario."""
+    W.addNode("O_S", 0, 0); W.addNode("O_E", 2, 0); W.addNode("O_N", 1, 2)
+    W.addNode("intersection", 1, 1, turning_fractions={
+        "P_S": {"S_N": 0.5, "S_W": 0.5},
+        "P_E": {"S_W": 1.0},
+        "P_N": {"S_W": 0.5, "S_S": 0.5},
+    })
+    W.addNode("D_N", 1, 3); W.addNode("D_W", -1, 1); W.addNode("D_S", 1, -1)
+    W.addLink("P_S", "O_S", "intersection", length=1000, free_flow_speed=20,
+              backward_wave_speed=5, jam_density=0.2, merge_priority=1.0)
+    W.addLink("P_E", "O_E", "intersection", length=1000, free_flow_speed=20,
+              backward_wave_speed=5, jam_density=0.2, merge_priority=0.1)
+    W.addLink("P_N", "O_N", "intersection", length=1000, free_flow_speed=20,
+              backward_wave_speed=5, jam_density=0.2, merge_priority=10.0)
+    W.addLink("S_N", "intersection", "D_N", length=1000, free_flow_speed=20,
+              backward_wave_speed=5, jam_density=0.2)
+    kw = {"capacity": sw_capacity} if sw_capacity else {"jam_density": 0.2}
+    W.addLink("S_W", "intersection", "D_W", length=1000, free_flow_speed=20,
+              backward_wave_speed=5, **kw)
+    W.addLink("S_S", "intersection", "D_S", length=1000, free_flow_speed=20,
+              backward_wave_speed=5, jam_density=0.2)
+
+
+def test_inm_uncongested():
+    """Floetteroed Table 1: uncongested 3x3 intersection."""
+    W = World(deltat=5, tmax=3000, print_mode=0)
+    _build_flotterod(W)
+    d_PS, d_PE, d_PN = 600/3600, 100/3600, 600/3600
+    W.adddemand("O_S", "D_N", 0, 2000, d_PS)
+    W.adddemand("O_E", "D_W", 0, 2000, d_PE)
+    W.adddemand("O_N", "D_S", 0, 2000, d_PN)
+    W.exec_simulation()
+    assert equal_tolerance(_avg_outflow(W.get_link("P_S"), 200, 1500), d_PS)
+    assert equal_tolerance(_avg_outflow(W.get_link("P_E"), 200, 1500), d_PE)
+    assert equal_tolerance(_avg_outflow(W.get_link("P_N"), 200, 1500), d_PN)
+    assert equal_tolerance(_avg_inflow(W.get_link("S_N"), 200, 1500), 300/3600)
+    assert equal_tolerance(_avg_inflow(W.get_link("S_W"), 200, 1500), 700/3600)
+    assert equal_tolerance(_avg_inflow(W.get_link("S_S"), 200, 1500), 300/3600)
+
+
+def test_inm_congested():
+    """Floetteroed Table 2: congested (S_W capacity=400/3600)."""
+    W = World(deltat=5, tmax=3000, print_mode=0)
+    _build_flotterod(W, sw_capacity=400/3600)
+    W.adddemand("O_S", "D_N", 0, 2000, 600/3600)
+    W.adddemand("O_E", "D_W", 0, 2000, 100/3600)
+    W.adddemand("O_N", "D_S", 0, 2000, 600/3600)
+    W.exec_simulation()
+    assert equal_tolerance(_avg_outflow(W.get_link("P_N"), 500, 2000), 600/3600)
+    assert equal_tolerance(_avg_outflow(W.get_link("P_S"), 500, 2000), 166.67/3600, rel_tol=0.15)
+    assert equal_tolerance(_avg_inflow(W.get_link("S_W"), 500, 2000), 400/3600)
+    assert equal_tolerance(_avg_inflow(W.get_link("S_S"), 500, 2000), 300/3600)
+
+
+def test_inm_flow_conservation():
+    """Flow conservation at INM node."""
+    W = World(deltat=5, tmax=3000, print_mode=0)
+    _build_flotterod(W, sw_capacity=400/3600)
+    W.adddemand("O_S", "D_N", 0, 2000, 600/3600)
+    W.adddemand("O_E", "D_W", 0, 2000, 100/3600)
+    W.adddemand("O_N", "D_S", 0, 2000, 600/3600)
+    W.exec_simulation()
+    PS, PE, PN = W.get_link("P_S"), W.get_link("P_E"), W.get_link("P_N")
+    SN, SW, SS = W.get_link("S_N"), W.get_link("S_W"), W.get_link("S_S")
+    for t in range(W.TSIZE + 1):
+        total_in = PS.cum_departure[t] + PE.cum_departure[t] + PN.cum_departure[t]
+        total_out = SN.cum_arrival[t] + SW.cum_arrival[t] + SS.cum_arrival[t]
+        assert abs(total_in - total_out) < 1e-6

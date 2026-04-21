@@ -378,12 +378,17 @@ class Analyzer:
             "k_norm": "viridis_r", "q_norm": "Blues", "v_norm": "viridis",
         }
         cm = cmap or default_cmaps.get(mode, "viridis")
+        # Copy the colormap so near-zero cells can be rendered white
+        # without mutating any globally-shared Colormap instance.
+        cm_obj = plt.get_cmap(cm).copy()
+        cm_obj.set_bad("white")
         pcm_last = None
 
-        for li, link in enumerate(links):
+        # First pass: compute Z arrays for all links
+        link_Z = []
+        for link in links:
             xs = np.linspace(0, link.length, nx)
             T, X = np.meshgrid(ts, xs, indexing='ij')
-
             Z = np.empty_like(T)
             for i in range(nt):
                 for j in range(nx):
@@ -402,18 +407,50 @@ class Analyzer:
                         Z[i, j] = q / link.q_star if link.q_star > 0 else 0
                     elif mode == "v_norm":
                         Z[i, j] = v / link.u if link.u > 0 else 0
+            link_Z.append((xs, T, X, Z))
 
+        # Determine shared color scale across all links.
+        # Per-link normalized modes already share a [0, 1] scale by definition,
+        # so fix vmin/vmax to that range. Absolute modes use the union of
+        # all links' value ranges so that colors are comparable across links.
+        # Near-zero cells are excluded from the range so they do not compress
+        # the scale (they will be rendered white via the masked-array path).
+        zero_tol = 1e-6
+        if mode in ("k_norm", "q_norm", "v_norm"):
+            auto_vmin, auto_vmax = 0.0, 1.0
+        elif mode != "N" and link_Z:
+            all_Z = np.concatenate([Z.ravel() for _, _, _, Z in link_Z])
+            nz = all_Z[np.abs(all_Z) >= zero_tol]
+            if nz.size > 0:
+                auto_vmin = float(np.min(nz))
+                auto_vmax = float(np.max(nz))
+            else:
+                auto_vmin, auto_vmax = 0.0, 1.0
+            if auto_vmax <= auto_vmin:
+                auto_vmax = auto_vmin + 1e-10
+        else:
+            auto_vmin, auto_vmax = None, None
+        vmin_use = vmin if vmin is not None else auto_vmin
+        vmax_use = vmax if vmax is not None else auto_vmax
+
+        # Second pass: draw with common vmin/vmax
+        for li, (link, (xs, T, X, Z)) in enumerate(zip(links, link_Z)):
             X_plot = X + link_boundaries[li]
-
+            x_lo = link_boundaries[li]
+            x_hi = link_boundaries[li + 1]
             if mode == "N":
                 ax.contour(T, X_plot, Z, levels=n_contours, colors="k", linewidths=0.5)
             else:
-                pcm_last = ax.pcolormesh(T, X_plot, Z, cmap=cm, shading="gouraud",
-                                         vmin=vmin, vmax=vmax)
+                Z_plot = np.ma.masked_where(np.abs(Z) < zero_tol, Z)
+                pcm_last = ax.imshow(Z_plot.T, cmap=cm_obj, origin="lower",
+                                      aspect="auto",
+                                      extent=[ts[0], ts[-1], x_lo, x_hi],
+                                      interpolation="none",
+                                      vmin=vmin_use, vmax=vmax_use)
 
         label_map = {
             "density": "k (veh/m)", "flow": "q (veh/s)", "speed": "v (m/s)",
-            "k_norm": "k / kappa", "q_norm": "q / q*", "v_norm": "v / u",
+            "k_norm": r"$k / \kappa$", "q_norm": r"$q / q^*$", "v_norm": r"$v / u$",
         }
         if pcm_last is not None:
             plt.colorbar(pcm_last, ax=ax, label=label_map.get(mode, mode))
@@ -425,6 +462,8 @@ class Analyzer:
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Position (m)")
         ax.set_title(f"Time-Space Diagram ({mode})")
+        ax.set_xlim(ts[0], ts[-1])
+        ax.set_ylim(link_boundaries[0], link_boundaries[-1])
         if xlim:
             ax.set_xlim(xlim)
         if ylim:
@@ -476,7 +515,7 @@ class Analyzer:
     # ================================================================
 
     def network(s, t=None, figsize=(6, 6), left_handed=True,
-                minwidth=0.5, maxwidth=12, node_size=4,
+                minwidth=0.5, maxwidth=12, node_size=4, fontsize=0,
                 legend=True):
         """Draw network state at time t.
 
@@ -515,6 +554,10 @@ class Analyzer:
             x1, y1 = link.start_node.x + ox, link.start_node.y + oy
             x2, y2 = link.end_node.x + ox, link.end_node.y + oy
 
+            # Skip links with zero visual length
+            if abs(x2 - x1) + abs(y2 - y1) < 1e-6:
+                continue
+
             # Compute state at segments along the link
             n_seg = 10
             seg_xs = np.linspace(0, link.length, n_seg + 1)
@@ -542,18 +585,19 @@ class Analyzer:
         # Nodes
         for node in s.W.NODES:
             ax.plot(node.x, node.y, "ko", markersize=node_size, zorder=10)
-            ax.annotate(node.name, (node.x, node.y), fontsize=6,
-                        ha="center", va="bottom", zorder=11)
+            if fontsize > 0:
+                ax.annotate(node.name, (node.x, node.y), fontsize=fontsize,
+                            ha="center", va="bottom", zorder=11)
 
         # Legend (colorbar for speed)
         if legend:
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
             sm.set_array([])
             cbar = plt.colorbar(sm, ax=ax, shrink=0.6)
-            cbar.set_label("v / u (speed ratio)")
+            cbar.set_label("$v / u$")
 
         ax.set_aspect("equal")
-        ax.set_title(f"Network (t={t:.0f}s)")
+        ax.set_title(f"t = {t:.0f} s")
         plt.tight_layout()
         return fig
 
@@ -601,6 +645,10 @@ class Analyzer:
             ox, oy = s._link_offset(link, left_handed)
             x1, y1 = link.start_node.x + ox, link.start_node.y + oy
             x2, y2 = link.end_node.x + ox, link.end_node.y + oy
+
+            # Skip links with zero visual length
+            if abs(x2 - x1) + abs(y2 - y1) < 1e-6:
+                continue
 
             ff_tt = row["free_travel_time"]
             avg_tt = row["average_travel_time"]
@@ -682,7 +730,7 @@ class Analyzer:
         minx, maxx, miny, maxy = s._network_extents()
 
         frames = []
-        times = range(0, W.TMAX, W.DELTAT * timestep_skip)
+        times = range(0, int(W.TMAX), int(W.DELTAT * timestep_skip))
 
         for t in times:
             fig, ax = plt.subplots(figsize=figsize)
@@ -691,6 +739,10 @@ class Analyzer:
                 ox, oy = s._link_offset(link, left_handed)
                 x1, y1 = link.start_node.x + ox, link.start_node.y + oy
                 x2, y2 = link.end_node.x + ox, link.end_node.y + oy
+
+                # Skip links with zero visual length
+                if abs(x2 - x1) + abs(y2 - y1) < 1e-6:
+                    continue
 
                 n_seg = 10
                 seg_xs = np.linspace(0, link.length, n_seg + 1)
@@ -711,6 +763,129 @@ class Analyzer:
                     ax.plot([sx, ex], [sy, ey], color=cmap(vi / link.u),
                             linewidth=lw, solid_capstyle="butt", zorder=6)
 
+                ax.plot([x1, x2], [y1, y2], "k--", linewidth=0.25, zorder=5)
+
+            for node in W.NODES:
+                ax.plot(node.x, node.y, "ko", markersize=node_size, zorder=10)
+
+            ax.set_xlim(minx, maxx)
+            ax.set_ylim(miny, maxy)
+            ax.set_aspect("equal")
+            ax.set_title(f"t={t:.0f}s")
+            plt.tight_layout()
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=dpi)
+            plt.close(fig)
+            buf.seek(0)
+            frames.append(Image.open(buf).copy())
+            buf.close()
+
+        if frames:
+            frames[0].save(file_name, save_all=True, append_images=frames[1:],
+                           optimize=False, duration=duration, loop=0)
+
+        return file_name
+
+    # ================================================================
+    # Network animation (link-based)
+    # ================================================================
+
+    def network_anim_linkbased(s, figsize=(6, 6), left_handed=True,
+                               minwidth=0.5, maxwidth=36, node_size=4,
+                               timestep_skip=10, duration=100, dpi=80,
+                               file_name=None):
+        """Create animated GIF with link-level aggregated traffic state.
+
+        Each link is drawn as a single line segment.
+        Width represents the number of vehicles on the link,
+        and color represents link-average speed (viridis colormap).
+        Suitable for getting an overview of large networks.
+
+        Parameters
+        ----------
+        figsize : tuple, optional
+            Figure size.
+        left_handed : bool, optional
+            True for left-handed traffic.
+        minwidth : float, optional
+            Minimum link width.
+        maxwidth : float, optional
+            Maximum link width.
+        node_size : float, optional
+            Node marker size.
+        timestep_skip : int, optional
+            Render every N-th timestep.
+        duration : int, optional
+            Frame duration in ms.
+        dpi : int, optional
+            Image resolution.
+        file_name : str or None, optional
+            Output GIF path. None for "out_{name}_linkbased.gif".
+
+        Returns
+        -------
+        str
+            Path to the saved GIF file.
+        """
+        W = s.W
+        if file_name is None:
+            file_name = f"out_{W.NAME or 'unsim'}_linkbased.gif"
+
+        cmap = plt.colormaps["viridis"]
+        minx, maxx, miny, maxy = s._network_extents()
+        dt = W.DELTAT
+
+        # Pre-compute max vehicle count across all links and time
+        # for consistent width scaling
+        max_vehicles = 1.0
+        for link in W.LINKS:
+            for ti in range(len(link.cum_arrival)):
+                n_veh = link.cum_arrival[ti] - link.cum_departure[ti]
+                if n_veh > max_vehicles:
+                    max_vehicles = n_veh
+
+        frames = []
+        times = range(0, int(W.TMAX), int(dt * timestep_skip))
+
+        for t in times:
+            fig, ax = plt.subplots(figsize=figsize)
+            ti = min(int(t / dt), len(W.LINKS[0].cum_arrival) - 1)
+
+            for link in W.LINKS:
+                ox, oy = s._link_offset(link, left_handed)
+                x1 = link.start_node.x + ox
+                y1 = link.start_node.y + oy
+                x2 = link.end_node.x + ox
+                y2 = link.end_node.y + oy
+
+                # Skip links with zero visual length
+                if abs(x2 - x1) + abs(y2 - y1) < 1e-6:
+                    continue
+
+                # Vehicle count on link
+                n_veh = max(link.cum_arrival[ti] - link.cum_departure[ti], 0)
+
+                # Average speed: mean of inflow and outflow rates * length / n_veh
+                if ti > 0:
+                    inflow = max(link.cum_arrival[ti]
+                                 - link.cum_arrival[ti - 1], 0) / dt
+                    outflow = max(link.cum_departure[ti]
+                                  - link.cum_departure[ti - 1], 0) / dt
+                else:
+                    inflow = 0
+                    outflow = 0
+                avg_flow = (inflow + outflow) / 2
+                if n_veh > 1e-3:
+                    v_avg = min(avg_flow * link.length / n_veh, link.u)
+                else:
+                    v_avg = link.u
+
+                lw = (n_veh / max_vehicles) * (maxwidth - minwidth) + minwidth
+                color = cmap(np.clip(v_avg / link.u, 0, 1))
+
+                ax.plot([x1, x2], [y1, y2], color=color,
+                        linewidth=lw, solid_capstyle="butt", zorder=6)
                 ax.plot([x1, x2], [y1, y2], "k--", linewidth=0.25, zorder=5)
 
             for node in W.NODES:

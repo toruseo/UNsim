@@ -1,19 +1,24 @@
 """
-Dynamic congestion pricing optimization for Chicago-Sketch network.
+Dynamic congestion pricing optimization via SPSA (no autodiff).
 
-Uses duo_logit (soft logit routing) for differentiable toll optimization.
-Optimizes per-link, per-time-period toll values to minimize:
-  L(toll) = TTT(toll) + lambda * ||toll||_2^2
+Same problem setting as example12b (Adam + autodiff) but uses
+Simultaneous Perturbation Stochastic Approximation -- a gradient-free
+method that estimates the gradient with only 2 function evaluations
+per iteration, regardless of dimensionality.
 
 Usage:
-  python examples/example12b_toll_optimization.py
+  python examples/example12d_toll_spsa.py
 
 Environment variables:
   PEAK_FACTOR : peak demand multiplier (default 1.5)
-  STEPS       : optimizer steps (default 200)
-  LR          : learning rate (default 1.0)
+  STEPS       : optimizer steps (default 5000)
+  TEMPERATURE : logit temperature (default 10)
   REG_LAMBDA  : L2 regularization coefficient (default 0.001)
-  TEMPERATURE : logit temperature (default 60)
+  SPSA_A      : stability constant A (default 100)
+  SPSA_C      : perturbation magnitude c (default 10.0)
+  SPSA_a      : step size a (default auto)
+  SPSA_ALPHA  : step size decay exponent (default 0.602)
+  SPSA_GAMMA  : perturbation decay exponent (default 0.101)
 """
 import sys, os, time
 import numpy as np
@@ -26,21 +31,20 @@ import jax.numpy as jnp
 from unsim.unsim_diff import simulate_duo, total_travel_time, trip_completed
 
 # ================================================================
-# 1. Build scenario (duo_logit version of example12a)
+# 1. Build scenario (identical to example12b)
 # ================================================================
 
 print("=" * 60)
 print("  Step 1: Build scenario (duo_logit)")
 print("=" * 60)
 
-TEMPERATURE = float(os.environ.get("TEMPERATURE", "60"))
+TEMPERATURE = float(os.environ.get("TEMPERATURE", "10"))
 
 from unsim import World
 from unsim.unsim_diff import world_to_jax
 
 N_FACTOR = float(os.environ.get("PEAK_FACTOR", "1.5"))
 
-# Load base Chicago network
 code = open(os.path.join(os.path.dirname(__file__),
                          "example06b_chicago_calibrated.py")).read()
 parts = code.split("W.exec_simulation()")
@@ -49,11 +53,9 @@ g = {"__file__": os.path.join(os.path.dirname(__file__),
 exec(parts[0], g)
 W = g["W"]
 
-# Override route choice to duo_logit
 W.ROUTE_CHOICE = "duo_logit"
 W.LOGIT_TEMPERATURE = TEMPERATURE
 
-# 3-period demand
 original_demands = list(W.demand_info)
 W.demand_info = []
 for orig, dest, ts, te, flow in original_demands:
@@ -104,7 +106,7 @@ print(f"  Trips completed: {trips0:.0f}")
 
 
 # ================================================================
-# 2. Loss function
+# 2. Loss function (forward-only, no grad needed)
 # ================================================================
 
 REG_LAMBDA = float(os.environ.get("REG_LAMBDA", "0.001"))
@@ -130,11 +132,11 @@ def loss_fn(theta_flat):
 
 
 # ================================================================
-# 3. JIT compile
+# 3. JIT compile (forward only)
 # ================================================================
 
 print(f"\n{'='*60}")
-print("  Step 2: JIT compile")
+print("  Step 2: JIT compile (forward only)")
 print("=" * 60)
 
 theta0 = jnp.zeros(n_params)
@@ -146,73 +148,92 @@ t_fwd = time.time() - t0
 print(f"  Forward compile+run: {t_fwd:.1f}s, loss={l0:.0f}")
 
 t0 = time.time()
-grad_jit = jax.jit(jax.grad(loss_fn))
-g0 = grad_jit(theta0)
-jax.block_until_ready(g0)
-t_grad = time.time() - t0
-g0_norm = float(jnp.linalg.norm(g0))
-g0_nnz = int(jnp.sum(jnp.abs(g0) > 1e-10))
-g0_nan = int(jnp.sum(jnp.isnan(g0)))
-print(f"  Gradient compile+run: {t_grad:.1f}s")
-print(f"  |grad|={g0_norm:.1f}, nonzero={g0_nnz}/{n_params}, nan={g0_nan}")
-
-# Cached speed
-t0 = time.time()
 _ = float(loss_jit(theta0))
 t_fwd_cached = time.time() - t0
-t0 = time.time()
-_ = grad_jit(theta0)
-jax.block_until_ready(_)
-t_grad_cached = time.time() - t0
-print(f"  Cached: forward {t_fwd_cached:.2f}s, gradient {t_grad_cached:.2f}s")
+print(f"  Cached forward: {t_fwd_cached:.2f}s")
+print(f"  (No gradient compilation -- SPSA is gradient-free)")
 
 
 # ================================================================
-# 4. L-BFGS-B optimization
+# 4. SPSA optimization
 # ================================================================
 
-STEPS = int(os.environ.get("STEPS", "200"))
-LR = float(os.environ.get("LR", "1.0"))
+STEPS = int(os.environ.get("STEPS", "5000"))
+
+# SPSA hyperparameters (Spall 1998 guidelines)
+SPSA_A = float(os.environ.get("SPSA_A", "100"))
+SPSA_c = float(os.environ.get("SPSA_C", "10.0"))
+SPSA_alpha = float(os.environ.get("SPSA_ALPHA", "0.602"))
+SPSA_gamma = float(os.environ.get("SPSA_GAMMA", "0.101"))
+
+# Auto-calibrate step size 'a' from initial gradient estimate
+# Do a few pilot perturbations to estimate gradient magnitude
+print(f"\n  Calibrating SPSA step size...")
+rng = np.random.RandomState(42)
+pilot_gnorms = []
+theta_np = np.zeros(n_params, dtype=np.float32)
+for _ in range(3):
+    delta = rng.choice([-1.0, 1.0], size=n_params).astype(np.float32)
+    theta_plus = jnp.array(np.maximum(theta_np + SPSA_c * delta, 0.0))
+    theta_minus = jnp.array(np.maximum(theta_np - SPSA_c * delta, 0.0))
+    lp = float(loss_jit(theta_plus))
+    lm = float(loss_jit(theta_minus))
+    g_hat = (lp - lm) / (2.0 * SPSA_c * delta)
+    pilot_gnorms.append(np.linalg.norm(g_hat))
+
+avg_gnorm = np.mean(pilot_gnorms)
+SPSA_a = float(os.environ.get("SPSA_a", "0"))
+if SPSA_a <= 0:
+    # Target initial step ~ 5.0 (matching Adam effective step)
+    SPSA_a = 5.0 * (SPSA_A + 1) ** SPSA_alpha / max(avg_gnorm, 1e-10)
+print(f"  Pilot |g_hat| avg: {avg_gnorm:.1f}")
+print(f"  SPSA params: a={SPSA_a:.4f}, c={SPSA_c}, A={SPSA_A}, "
+      f"alpha={SPSA_alpha}, gamma={SPSA_gamma}")
 
 print(f"\n{'='*60}")
-print(f"  Step 3: Adam optimization (steps={STEPS}, lr={LR})")
+print(f"  Step 3: SPSA optimization (steps={STEPS})")
 print("=" * 60)
 
-theta = jnp.zeros(n_params)
-m_adam = jnp.zeros(n_params)
-v_adam = jnp.zeros(n_params)
-beta1, beta2, eps = 0.9, 0.999, 1e-8
-
-GRAD_CLIP = float(os.environ.get("GRAD_CLIP", "1e8"))
+theta_np = np.zeros(n_params, dtype=np.float32)
+best_ttt = ttt0
+best_theta_np = theta_np.copy()
 
 opt_losses = []
 opt_ttts = []
 opt_times = []
-best_ttt = ttt0
-best_theta = theta
 t_start = time.time()
 
 for step in range(1, STEPS + 1):
-    g = grad_jit(theta)
-    g_norm = float(jnp.linalg.norm(g))
-    if g_norm > GRAD_CLIP:
-        g = g * (GRAD_CLIP / g_norm)
+    # Decaying step size and perturbation
+    a_k = SPSA_a / (SPSA_A + step) ** SPSA_alpha
+    c_k = SPSA_c / step ** SPSA_gamma
 
-    m_adam = beta1 * m_adam + (1 - beta1) * g
-    v_adam = beta2 * v_adam + (1 - beta2) * g ** 2
-    m_hat = m_adam / (1 - beta1 ** step)
-    v_hat = v_adam / (1 - beta2 ** step)
-    theta = theta - LR * m_hat / (jnp.sqrt(v_hat) + eps)
-    theta = jnp.maximum(theta, 0.0)
+    # Random perturbation: Bernoulli +/-1
+    delta = rng.choice([-1.0, 1.0], size=n_params).astype(np.float32)
 
+    # Evaluate loss at theta +/- c_k * delta (with projection to >=0)
+    theta_plus = jnp.array(np.maximum(theta_np + c_k * delta, 0.0))
+    theta_minus = jnp.array(np.maximum(theta_np - c_k * delta, 0.0))
+    lp = float(loss_jit(theta_plus))
+    lm = float(loss_jit(theta_minus))
+
+    # SPSA gradient estimate
+    g_hat = (lp - lm) / (2.0 * c_k * delta)
+
+    # Update with projection to non-negative
+    theta_np = np.maximum(theta_np - a_k * g_hat, 0.0)
+
+    # Logging
     if step == 1 or step % 10 == 0 or step == STEPS:
-        l = float(loss_jit(theta))
-        toll_arr = build_toll_array(theta)
+        theta_jnp = jnp.array(theta_np)
+        l = float(loss_jit(theta_jnp))
+        toll_arr = build_toll_array(theta_jnp)
         p = params._replace(toll=toll_arr)
         state = simulate_duo(p, config)
         ttt_val = float(total_travel_time(state, config))
         elapsed = time.time() - t_start
-        toll_norm = float(jnp.linalg.norm(theta))
+        toll_norm = float(np.linalg.norm(theta_np))
+        g_norm = float(np.linalg.norm(g_hat))
 
         opt_losses.append(l)
         opt_ttts.append(ttt_val)
@@ -220,15 +241,16 @@ for step in range(1, STEPS + 1):
 
         if ttt_val < best_ttt:
             best_ttt = ttt_val
-            best_theta = theta
+            best_theta_np = theta_np.copy()
 
         if step == 1 or step % 50 == 0 or step == STEPS:
-            print(f"    step {step:4d}: loss={l:.0f}, TTT={ttt_val/3600:.0f} veh-hr "
+            print(f"    step {step:5d}: loss={l:.0f}, TTT={ttt_val/3600:.0f} veh-hr "
                   f"({(ttt_val-ttt0)/ttt0*100:+.2f}%), "
-                  f"|toll|={toll_norm:.1f}, |g|={g_norm:.0f}, t={elapsed:.0f}s",
+                  f"|toll|={toll_norm:.1f}, |g|={g_norm:.0f}, "
+                  f"a_k={a_k:.3f}, c_k={c_k:.2f}, t={elapsed:.0f}s",
                   flush=True)
 
-theta_opt = best_theta
+theta_opt = jnp.array(best_theta_np)
 toll_opt = build_toll_array(theta_opt)
 state_opt = simulate_duo(params._replace(toll=toll_opt), config)
 jax.block_until_ready(state_opt.cum_departure)
@@ -256,7 +278,7 @@ print(f"  Free-flow TTT:  {ff_ttt/3600:.0f} veh-hr")
 print(f"  Trips baseline: {trips0:.0f}")
 print(f"  Trips optimized:{trips_opt:.0f}")
 print(f"  Toll: mean={toll_mean:.1f}s, max={toll_max:.1f}s, active={n_tolled}/{n_params}")
-print(f"  Adam: {STEPS} steps, {t_total:.0f}s")
+print(f"  SPSA: {STEPS} steps ({STEPS*2} fwd evals), {t_total:.0f}s")
 print("=" * 60)
 
 
@@ -267,12 +289,11 @@ print("=" * 60)
 outdir = os.path.join(os.path.dirname(__file__), "..", "results")
 os.makedirs(outdir, exist_ok=True)
 
-# Save full toll array (n_links, n_toll_steps) and metadata
-save_path = os.path.join(outdir, "toll_optimized.npz")
+save_path = os.path.join(outdir, "toll_spsa.npz")
 np.savez(save_path,
-         toll_full=np.asarray(toll_opt),          # (n_links, n_toll_steps)
-         toll_congested=np.asarray(theta_opt),     # (n_congested * n_toll_steps,)
-         congested_idx=congested_idx,              # (n_congested,)
+         toll_full=np.asarray(toll_opt),
+         toll_congested=best_theta_np,
+         congested_idx=congested_idx,
          n_toll_steps=n_toll_steps,
          temperature=TEMPERATURE,
          reg_lambda=REG_LAMBDA,

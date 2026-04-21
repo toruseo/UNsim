@@ -748,15 +748,23 @@ class Link:
 
         if N_free <= N_cong:
             # Free-flow regime: q = dN_U/dt at the reference time
-            i = max(0, min(int(idx_free), len(s.cum_arrival) - 2))
-            q = max((s.cum_arrival[i + 1] - s.cum_arrival[i]) / dt, 0)
+            if idx_free < 0:
+                # Before simulation start: no traffic has arrived here yet
+                q = 0
+            else:
+                i = max(0, min(int(idx_free), len(s.cum_arrival) - 2))
+                q = max((s.cum_arrival[i + 1] - s.cum_arrival[i]) / dt, 0)
             q = min(q, s.q_star)
             k = q / s.u
             v = s.u
         else:
             # Congested regime: q = dN_D/dt at the reference time
-            i = max(0, min(int(idx_cong), len(s.cum_departure) - 2))
-            q = max((s.cum_departure[i + 1] - s.cum_departure[i]) / dt, 0)
+            if idx_cong < 0:
+                # Before simulation start: no departures yet
+                q = 0
+            else:
+                i = max(0, min(int(idx_cong), len(s.cum_departure) - 2))
+                q = max((s.cum_departure[i + 1] - s.cum_departure[i]) / dt, 0)
             q = min(q, s.q_star)
             k = s.kappa - q / s.w
             v = q / k if k > 1e-10 else 0

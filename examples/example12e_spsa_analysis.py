@@ -1,7 +1,7 @@
 """
-Analyze optimized congestion pricing results from example12b.
+Analyze optimized congestion pricing results from example12d.
 
-Loads toll_optimized.npz, runs baseline and tolled simulations,
+Loads toll_spsa.npz, runs baseline and tolled simulations,
 and generates comparison plots.
 
 Usage:
@@ -31,7 +31,7 @@ print("  Loading toll data and building scenario")
 print("=" * 60)
 
 result_dir = os.path.join(os.path.dirname(__file__), "..", "results")
-data = np.load(os.path.join(result_dir, "toll_optimized.npz"))
+data = np.load(os.path.join(result_dir, "toll_spsa.npz"))
 toll_full = data["toll_full"]
 TEMPERATURE = float(data["temperature"])
 ttt_opt_saved = float(data["ttt_optimized"])
@@ -40,7 +40,7 @@ print(f"  Saved result: TTT {ttt_base_saved/3600:.0f} -> {ttt_opt_saved/3600:.0f
       f"({(ttt_base_saved-ttt_opt_saved)/ttt_base_saved*100:.1f}% reduction)")
 print(f"  Temperature: {TEMPERATURE}")
 
-# Build scenario (same as example12b)
+# Build scenario (same as example12d)
 N_FACTOR = float(os.environ.get("PEAK_FACTOR", "1.5"))
 code = open(os.path.join(os.path.dirname(__file__),
                          "example06b_chicago_calibrated.py")).read()
@@ -134,9 +134,9 @@ ax.set_xlabel("Time (h)")
 ax.set_ylabel("Total toll across all links (h)")
 ax.grid(True, alpha=0.3)
 fig.tight_layout()
-fig.savefig(os.path.join(imgdir, "toll_total_timeseries.png"), dpi=150)
+fig.savefig(os.path.join(imgdir, "spsa_total_timeseries.png"), dpi=150)
 plt.close(fig)
-print("    toll_total_timeseries.png")
+print("    spsa_total_timeseries.png")
 
 
 # ================================================================
@@ -154,9 +154,9 @@ ax.set_ylabel("Vehicles in network")
 ax.legend()
 ax.grid(True, alpha=0.3)
 fig.tight_layout()
-fig.savefig(os.path.join(imgdir, "toll_vehicle_count.png"), dpi=150)
+fig.savefig(os.path.join(imgdir, "spsa_vehicle_count.png"), dpi=150)
 plt.close(fig)
-print("    toll_vehicle_count.png")
+print("    spsa_vehicle_count.png")
 
 
 # ================================================================
@@ -179,9 +179,9 @@ ax.set_ylabel("Network average speed (km/h)")
 ax.legend()
 ax.grid(True, alpha=0.3)
 fig.tight_layout()
-fig.savefig(os.path.join(imgdir, "toll_avg_speed.png"), dpi=150)
+fig.savefig(os.path.join(imgdir, "spsa_avg_speed.png"), dpi=150)
 plt.close(fig)
-print("    toll_avg_speed.png")
+print("    spsa_avg_speed.png")
 
 
 # ================================================================
@@ -193,13 +193,12 @@ ax.scatter(n_veh_base, throughput_base, c="r", s=3, alpha=0.5, label="No toll")
 ax.scatter(n_veh_toll, throughput_toll, c="b", s=3, alpha=0.5, label="With toll")
 ax.set_xlabel("Network vehicle count")
 ax.set_ylabel("Network throughput (veh-m/s)")
-ax.tick_params(axis="both", labelsize=plt.rcParams["font.size"] * 0.8)
 ax.legend()
 ax.grid(True, alpha=0.3)
 fig.tight_layout()
-fig.savefig(os.path.join(imgdir, "toll_mfd.png"), dpi=150)
+fig.savefig(os.path.join(imgdir, "spsa_mfd.png"), dpi=150)
 plt.close(fig)
-print("    toll_mfd.png")
+print("    spsa_mfd.png")
 
 
 # ================================================================
@@ -250,18 +249,18 @@ def run_python_sim(use_toll):
 print("\n  Running Python baseline for network_average plot...")
 W_base = run_python_sim(use_toll=False)
 fig_base = W_base.analyzer.network_average(show_labels=False, node_size=0)
-fig_base.savefig(os.path.join(imgdir, "toll_network_avg_baseline.png"),
+fig_base.savefig(os.path.join(imgdir, "spsa_network_avg_baseline.png"),
                  dpi=150, bbox_inches="tight")
 plt.close(fig_base)
-print("    toll_network_avg_baseline.png")
+print("    spsa_network_avg_baseline.png")
 
 print("  Running Python tolled for network_average plot...")
 W_toll_py = run_python_sim(use_toll=True)
 fig_toll = W_toll_py.analyzer.network_average(show_labels=False, node_size=0)
-fig_toll.savefig(os.path.join(imgdir, "toll_network_avg_tolled.png"),
+fig_toll.savefig(os.path.join(imgdir, "spsa_network_avg_tolled.png"),
                  dpi=150, bbox_inches="tight")
 plt.close(fig_toll)
-print("    toll_network_avg_tolled.png")
+print("    spsa_network_avg_tolled.png")
 
 
 # ================================================================
@@ -293,12 +292,11 @@ cbar = plt.colorbar(sm, ax=ax, shrink=0.6)
 cbar.set_label("Time-averaged toll (min)")
 
 ax.set_aspect("equal")
-ax.tick_params(axis="both", labelsize=plt.rcParams["font.size"] * 0.8)
 fig.tight_layout()
-fig.savefig(os.path.join(imgdir, "toll_link_avg.png"), dpi=150,
+fig.savefig(os.path.join(imgdir, "spsa_link_avg.png"), dpi=150,
             bbox_inches="tight")
 plt.close(fig)
-print("    toll_link_avg.png")
+print("    spsa_link_avg.png")
 
 
 # ================================================================
@@ -306,8 +304,7 @@ print("    toll_link_avg.png")
 # ================================================================
 
 # Parse optimization log if available
-logpath = os.environ.get("TOLL_LOG",
-                         os.path.join(result_dir, "opt10k.log"))
+logpath = os.path.join(result_dir, "spsa_final.log")
 if os.path.exists(logpath):
     import re
     steps_log, losses_log, ttts_log, gnorms_log = [], [], [], []
@@ -345,11 +342,11 @@ if os.path.exists(logpath):
         axes[2].grid(True, alpha=0.3)
 
         fig.tight_layout()
-        fig.savefig(os.path.join(imgdir, "toll_convergence.png"), dpi=150)
+        fig.savefig(os.path.join(imgdir, "spsa_convergence.png"), dpi=150)
         plt.close(fig)
-        print("    toll_convergence.png")
+        print("    spsa_convergence.png")
 else:
-    print("    (no opt10k.log found, skipping convergence plot)")
+    print("    (no spsa_final.log found, skipping convergence plot)")
 
 
 # ================================================================
