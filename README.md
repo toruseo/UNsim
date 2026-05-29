@@ -15,12 +15,28 @@
 
 ## Simulation Examples
 
+### Simplie Simulation
 
-<img width="500" alt="grid11x11_anim_linkbased_3hours_11km_60000vehs_5sec_by_2GHz_cpu" src="https://github.com/user-attachments/assets/c0508731-a352-4ca6-aa9c-17e7e838f4f1" />
+<img width="400" alt="grid11x11_anim_linkbased_3hours_11km_60000vehs_5sec_by_2GHz_cpu" src="https://github.com/user-attachments/assets/c0508731-a352-4ca6-aa9c-17e7e838f4f1" />
 
 60000 vehicles travel through a 10 km grid network over 3 hours. 
 Dark colors indicate congestion (slow speeds). 
 The simulation wall-clock time was 5 seconds on a 2.0 GHz CPU in pure Python mode.
+
+### Autodiff-based large-scale optimization
+
+<p float="left">
+<img alt="toll_network_avg_tolled" src="https://github.com/user-attachments/assets/bebc446e-4379-42e3-b0db-6b10fb1cc688" width="400"/>
+<img alt="toll_ad_vs_spsa_convergence" src="https://github.com/user-attachments/assets/ccb44976-fdbb-4883-a7c9-80e7529a3058" width="400"/>
+</p>
+
+
+One million vehicles travel through the Chicago network (approximately 2500 links) over a 3-hour period.
+The simulation time for a single run was 0.2 seconds using a GPU.
+
+Additionally, we solve a dynamic congestion pricing optimization problem on this network.
+The number of decision variables is 15000, corresponding to the number of links and tolling periods.
+This problem is very difficult to solve using conventional approaches (e.g., SPSA in the figure above), but our simulator quickly produced a high-quality solution (AD in the figure).
 
 ## Usage
 
@@ -73,6 +89,8 @@ Simulation completed. merge
   <img width="400" alt="network_t200" src="https://github.com/user-attachments/assets/cac09936-3672-4bd4-9922-df8d4c7aeacb" />
   <img width="400" alt="network_t800" src="https://github.com/user-attachments/assets/cd702ac6-dfc3-4f34-b807-7b8148b7a9c9" />
 </p>
+
+For further usage including Autodiff, please see the [example scripts](https://github.com/toruseo/UNsim/tree/main/examples)
 
 ## Install
 
