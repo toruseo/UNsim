@@ -90,7 +90,7 @@ Simulation completed. merge
   <img width="400" alt="network_t800" src="https://github.com/user-attachments/assets/cd702ac6-dfc3-4f34-b807-7b8148b7a9c9" />
 </p>
 
-For further usage including Autodiff, please see the [example scripts](https://github.com/toruseo/UNsim/tree/main/examples)
+For further usage including Autodiff, please see the [example scripts](https://github.com/toruseo/UNsim/tree/main/examples).
 
 ## Install
 
