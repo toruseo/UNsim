@@ -811,6 +811,64 @@ def simulation_step_fwd(carry, t_index, params, link_state, config):
     return new_carry, output
 
 
+def _scan_with_checkpoint(step_fn, init_carry, tsize, checkpoint_every):
+    """Run a time-loop scan with gradient checkpointing (rematerialization).
+
+    Splits the ``tsize``-step loop into segments of ``checkpoint_every``
+    steps and wraps each segment in ``jax.checkpoint``. Reverse-mode AD
+    then stores only the scan carry at segment boundaries and recomputes
+    intra-segment intermediates during the backward pass. Peak residual
+    memory drops from O(tsize) to O(tsize / checkpoint_every +
+    checkpoint_every) per-step residuals, at the cost of roughly one
+    extra forward pass during the backward sweep.
+
+    Parameters
+    ----------
+    step_fn : callable
+        Scan body ``(carry, t_index) -> (new_carry, output)`` where
+        ``t_index`` is the absolute timestep index.
+    init_carry : PyTree
+        Initial scan carry.
+    tsize : int
+        Total number of timesteps.
+    checkpoint_every : int
+        Number of timesteps per checkpointed segment. Clamped to
+        ``[1, tsize]``. Smaller values save more memory but increase
+        recomputation overhead per segment boundary.
+
+    Returns
+    -------
+    (final_carry, outputs)
+        Identical to ``jax.lax.scan(step_fn, init_carry,
+        jnp.arange(tsize))``.
+    """
+    checkpoint_every = int(checkpoint_every)
+    if checkpoint_every <= 0:
+        raise ValueError("checkpoint_every must be a positive integer")
+    checkpoint_every = min(checkpoint_every, tsize)
+    n_seg = tsize // checkpoint_every
+    n_main = n_seg * checkpoint_every
+
+    @jax.checkpoint
+    def _segment(carry, t_start):
+        t_indices = t_start + jnp.arange(checkpoint_every)
+        return jax.lax.scan(step_fn, carry, t_indices)
+
+    t_starts = jnp.arange(n_seg) * checkpoint_every
+    carry, outputs = jax.lax.scan(_segment, init_carry, t_starts)
+    # (n_seg, checkpoint_every, ...) -> (n_seg * checkpoint_every, ...)
+    outputs = jax.tree_util.tree_map(
+        lambda x: x.reshape((n_main,) + x.shape[2:]), outputs)
+
+    if n_main < tsize:
+        # Remainder steps (not checkpointed; at most checkpoint_every - 1)
+        carry, out_rem = jax.lax.scan(step_fn, carry, jnp.arange(n_main, tsize))
+        outputs = jax.tree_util.tree_map(
+            lambda a, b: jnp.concatenate([a, b], axis=0), outputs, out_rem)
+
+    return carry, outputs
+
+
 def _reconstruct_state(final_carry, outputs, config):
     """Reconstruct full SimState from scan outputs via cumulative sum."""
     dt = config.deltat
@@ -879,7 +937,7 @@ def _build_state_fwd(final_carry, outputs, config):
     )
 
 
-def simulate(params, config, differentiable=True):
+def simulate(params, config, differentiable=True, checkpoint_every=None):
     """Run full LTM simulation.
 
     Parameters
@@ -890,6 +948,13 @@ def simulate(params, config, differentiable=True):
         If True (default), use windowed carry suitable for jax.grad.
         If False, use full-array carry for faster forward-only evaluation
         (not compatible with reverse-mode AD).
+    checkpoint_every : int or None, optional
+        If None (default), no gradient checkpointing (current behavior).
+        If a positive integer, split the time loop into segments of this
+        many steps and apply jax.checkpoint to each, reducing peak GPU
+        memory of reverse-mode AD at the cost of extra recomputation in
+        the backward pass. Smaller values save more memory. Only effective
+        when ``differentiable=True``.
 
     Returns
     -------
@@ -913,7 +978,12 @@ def simulate(params, config, differentiable=True):
         )
         step_fn = functools.partial(simulation_step,
                                     params=params, link_state=link_state, config=config)
-        final_carry, outputs = jax.lax.scan(step_fn, init_carry, jnp.arange(config.tsize))
+        if checkpoint_every is None:
+            final_carry, outputs = jax.lax.scan(
+                step_fn, init_carry, jnp.arange(config.tsize))
+        else:
+            final_carry, outputs = _scan_with_checkpoint(
+                step_fn, init_carry, config.tsize, checkpoint_every)
         return _reconstruct_state(final_carry, outputs, config)
     else:
         init_carry = FwdCarry(
@@ -1680,7 +1750,7 @@ def _build_state_aon_fwd(final_carry, config, next_link_ids):
     )
 
 
-def simulate_aon(params, config, differentiable=True):
+def simulate_aon(params, config, differentiable=True, checkpoint_every=None):
     """Run AON simulation with routes fixed at free-flow shortest paths.
 
     Per-destination tracking is maintained internally so that traffic is
@@ -1702,6 +1772,10 @@ def simulate_aon(params, config, differentiable=True):
     differentiable : bool, optional
         If True (default), supports jax.grad w.r.t. params.
         If False, use memory-optimized forward-only evaluation.
+    checkpoint_every : int or None, optional
+        Gradient checkpointing segment length passed to ``simulate_duo``
+        when ``differentiable=True``. See ``simulate_duo``. Ignored when
+        ``differentiable=False``.
 
     Returns
     -------
@@ -1710,7 +1784,8 @@ def simulate_aon(params, config, differentiable=True):
     if differentiable:
         # Fall back to DUO with routes frozen at t=0.
         config_aon = config._replace(route_update_interval=config.tsize + 1)
-        return simulate_duo(params, config_aon, differentiable=True)
+        return simulate_duo(params, config_aon, differentiable=True,
+                            checkpoint_every=checkpoint_every)
 
     # --- Memory-optimized forward-only path ---
     link_state = compute_link_state(params, config)
@@ -2304,7 +2379,7 @@ def duo_simulation_step_fwd(carry, t_index, params, link_state, config):
     return new_carry, output
 
 
-def simulate_duo(params, config, differentiable=True):
+def simulate_duo(params, config, differentiable=True, checkpoint_every=None):
     """Run DUO simulation.
 
     Parameters
@@ -2315,6 +2390,13 @@ def simulate_duo(params, config, differentiable=True):
         If True (default), use windowed carry suitable for jax.grad.
         If False, use full-array carry for faster forward-only evaluation
         (not compatible with reverse-mode AD).
+    checkpoint_every : int or None, optional
+        If None (default), no gradient checkpointing (current behavior).
+        If a positive integer, split the time loop into segments of this
+        many steps and apply jax.checkpoint to each, reducing peak GPU
+        memory of reverse-mode AD at the cost of extra recomputation in
+        the backward pass. Smaller values save more memory. Only effective
+        when ``differentiable=True``.
 
     Returns
     -------
@@ -2337,7 +2419,12 @@ def simulate_duo(params, config, differentiable=True):
         )
         step_fn = functools.partial(duo_simulation_step,
                                     params=params, link_state=link_state, config=config)
-        final_carry, outputs = jax.lax.scan(step_fn, init_carry, jnp.arange(config.tsize))
+        if checkpoint_every is None:
+            final_carry, outputs = jax.lax.scan(
+                step_fn, init_carry, jnp.arange(config.tsize))
+        else:
+            final_carry, outputs = _scan_with_checkpoint(
+                step_fn, init_carry, config.tsize, checkpoint_every)
         return _reconstruct_state(final_carry, outputs, config)
     else:
         init_carry = FwdCarry(
