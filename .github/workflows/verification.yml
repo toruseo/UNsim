@@ -27,14 +27,3 @@ jobs:
       - name: Run tests
         run: |
           python -m pytest tests/ -v
-
-      - name: DUO comparison report (Kuwahara + Grid)
-        run: |
-          python tests/test_duo.py
-
-      - name: Upload DUO report PNGs
-        uses: actions/upload-artifact@v7
-        with:
-          name: duo-report-pngs
-          path: docs/img/*.png
-          if-no-files-found: warn
