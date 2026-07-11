@@ -32,4 +32,4 @@ reference
 
 - [GitHub repository](https://github.com/toruseo/UNsim)
 - [arXiv preprint](https://doi.org/10.48550/arXiv.2604.11380)
-- [Toru Seo (Author)](https://toruseo.jp/index_en.html)
+- [Toru Seo (Author)](https://toruseo.jp)
