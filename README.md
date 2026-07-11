@@ -7,7 +7,7 @@
 
 
 > [!IMPORTANT]
->  **Early development stage.** There may be bugs and inconsistencies. The performance needs to be optimized (especially the memory consumption). Documentation should be added. This is more like a research prototype than a library. The code and API will change significantly in the future.
+>  **Early development stage.** There may be bugs and inconsistencies. The code and API will change significantly in the future, especially for AD part.
 
 ## Main Features
 
