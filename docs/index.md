@@ -18,6 +18,8 @@ The simulation wall-clock time was 5 seconds on a 2.0 GHz CPU in pure Python mod
 - Lightning-fast JAX mode on a good GPU server: 0.3 sec for forward simulation on the Chicago-Sketch dataset (2500 links, 1 million vehicles, 3 hours), and 0.5 sec for backward differentiation
 - The basic features and syntax are almost identical to those of the [UXsim](https://github.com/toruseo/UXsim) traffic flow simulator
 
+## Contents
+
 ```{toctree}
 :maxdepth: 2
 
