@@ -18,7 +18,7 @@
 
 ## Simulation Examples
 
-### Simplie Simulation
+### Simple Simulation
 
 <img width="400" alt="grid11x11_anim_linkbased_3hours_11km_60000vehs_5sec_by_2GHz_cpu" src="https://github.com/user-attachments/assets/c0508731-a352-4ca6-aa9c-17e7e838f4f1" />
 
@@ -110,7 +110,7 @@ This simulator implements the following transportation scientific models:
 - [Incremental Node Model](https://doi.org/10.1016/j.trb.2011.04.001): general intersection or junction model
 - [Dynamic User Optimum](https://doi.org/10.1016/S0191-2615(00)00005-9): route choice model in which each traveler chooses the real-time minimum travel time path
 
-For the details, please see [arXiv preprint](https://doi.org/10.48550/arXiv.2604.11380).
+For the details, please see the [arXiv preprint](https://doi.org/10.48550/arXiv.2604.11380).
 
 ## Terms of Use & License
 
