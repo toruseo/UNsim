@@ -2,6 +2,8 @@
 
 [![PyPi](https://img.shields.io/pypi/v/unsim.svg)](https://pypi.python.org/pypi/unsim)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.11380-b31b1b.svg)](https://doi.org/10.48550/arXiv.2604.11380)
+[![Jupyter](https://img.shields.io/badge/Jupyter_notebook-tutorial-orange)](https://github.com/toruseo/UNsim/blob/main/examples/demo01_basic_tutorial.ipynb)
+
 
 > [!IMPORTANT]
 >  **Early development stage.** There may be bugs and inconsistencies. The performance needs to be optimized (especially the memory consumption). Documentation should be added. This is more like a research prototype than a library. The code and API will change significantly in the future.
@@ -90,7 +92,7 @@ Simulation completed. merge
   <img width="400" alt="network_t800" src="https://github.com/user-attachments/assets/cd702ac6-dfc3-4f34-b807-7b8148b7a9c9" />
 </p>
 
-For further usage including Autodiff, please see the [example scripts](https://github.com/toruseo/UNsim/tree/main/examples).
+For further usage including Autodiff, please see the [Jupyter notebook tutorial](https://github.com/toruseo/UNsim/blob/main/examples/demo01_basic_tutorial.ipynb) and [example scripts](https://github.com/toruseo/UNsim/tree/main/examples).
 
 ## Install
 
