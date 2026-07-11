@@ -13,7 +13,7 @@
 
 - Simple, lightweight, and easy-to-use Python implementation of modern standard models of dynamic network traffic flow
 - An end-to-end differentiable simulation using JAX
-- Lightning-fast JAX mode on a good GPU server: 0.3 sec for forward simulation on the Chicago-Sketch dataset (2500 links, 1 million vehicles, 3 hours), and 0.5 sec for backward differentiation
+- Lightning-fast JAX mode mode with a GPU: 0.3 sec for forward simulation on the Chicago-Sketch dataset (2500 links, 1 million vehicles, 3 hours), and 0.5 sec for backward differentiation
 - The basic features and syntax are almost identical to those of the [UXsim](https://github.com/toruseo/UXsim) traffic flow simulator
 
 ## Simulation Examples
