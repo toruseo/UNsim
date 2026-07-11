@@ -3,6 +3,7 @@
 [![PyPi](https://img.shields.io/pypi/v/unsim.svg)](https://pypi.python.org/pypi/unsim)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.11380-b31b1b.svg)](https://doi.org/10.48550/arXiv.2604.11380)
 [![Jupyter](https://img.shields.io/badge/Jupyter_notebook-tutorial-orange)](https://github.com/toruseo/UNsim/blob/main/examples/demo01_basic_tutorial.ipynb)
+[![docs](https://img.shields.io/badge/docs-under_development-yellow)](https://toruseo.github.io/UNsim)
 
 
 > [!IMPORTANT]
