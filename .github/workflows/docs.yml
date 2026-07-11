@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -16,18 +16,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout docs branch
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: docs
-          fetch-depth: 0
-
-      - name: Merge latest main into docs
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git merge origin/main -m "Merge main into docs for documentation build"
-          git push origin docs
 
       - name: Set up Python
         uses: actions/setup-python@v5
