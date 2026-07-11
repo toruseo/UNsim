@@ -1,7 +1,7 @@
-# UNsim: Lightning fast traffic simulation in Python with Autodiff
+# UNsim: traffic simulation with Autodiff
 
 UNsim is a differentiable macroscopic network traffic simulator in Python.
-It also provides a JAX-based differentiable simulation engine that enables Lightning fast simulation using GPU and gradient-based applications such as OD demand calibration.
+It also provides a JAX-based differentiable simulation engine that enables lightning fast simulation using GPU and gradient-based applications such as OD demand calibration.
 
 This documentation site is still under development.
 
@@ -20,7 +20,6 @@ The simulation wall-clock time was 5 seconds on a 2.0 GHz CPU in pure Python mod
 
 ```{toctree}
 :maxdepth: 2
-:caption: Contents
 
 getting_started
 tutorial
