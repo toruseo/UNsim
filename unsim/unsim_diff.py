@@ -9,10 +9,10 @@ Usage
 >>> from unsim import World
 >>> from unsim.unsim_diff import world_to_jax, simulate, total_travel_time
 >>> W = World(...); W.addNode(...); W.addLink(...); W.adddemand(...)
->>> params, config, lengths = world_to_jax(W)
->>> state = simulate(params, config, lengths)
+>>> params, config = world_to_jax(W)
+>>> state = simulate(params, config)
 >>> ttt = total_travel_time(state, config)
->>> grad_fn = jax.grad(lambda p: total_travel_time(simulate(p, config, lengths), config))
+>>> grad_fn = jax.grad(lambda p: total_travel_time(simulate(p, config), config))
 >>> grads = grad_fn(params)
 """
 
@@ -107,6 +107,10 @@ class Params(NamedTuple):
     toll : jnp.ndarray, (n_links, n_toll_steps)
         Congestion pricing toll in seconds (time equivalent) per link
         per toll step. Zero for untolled links.
+    route_bias : jnp.ndarray, (n_dests, n_nodes, max_out)
+        Additive bias on the logit route-choice logits (dimensionless).
+        Zero recovers the pure cost-based logit split. Only used for
+        route_choice "duo_logit".
     """
     u: jnp.ndarray
     kappa: jnp.ndarray
@@ -121,6 +125,9 @@ class Params(NamedTuple):
     turning_fractions: jnp.ndarray
     od_demand_rate: jnp.ndarray  # (n_nodes, n_dests, tsize) per-OD demand for DUO
     toll: jnp.ndarray  # (n_links, n_toll_steps) congestion pricing toll (s)
+    route_bias: jnp.ndarray  # (n_dests, n_nodes, max_out) additive logit
+    # bias on duo_logit route choice; zeros recover the pure cost-based
+    # split
 
 
 class LinkState(NamedTuple):
@@ -2092,7 +2099,8 @@ def duo_simulation_step(carry, t_index, params, link_state, config):
         # to avoid softmax([-inf,...]) = NaN
         INF = 1e15
         cost_via = jnp.where(outlink_valid[None, :, :], cost_via, INF)
-        logits = -cost_via / config.logit_temperature
+        logits = -cost_via / config.logit_temperature \
+            + params.route_bias[:, :, :cost_via.shape[2]]
         has_outlinks = config.node_n_outlinks > 0  # (n_nodes,)
         logits = jnp.where(
             ~has_outlinks[None, :, None],
@@ -2280,7 +2288,8 @@ def duo_simulation_step_fwd(carry, t_index, params, link_state, config):
         cost_via = link_cost[safe_outlinks][None, :, :] + dist_from_end  # (n_dests, n_nodes, max_out)
         INF = 1e15
         cost_via = jnp.where(outlink_valid[None, :, :], cost_via, INF)
-        logits = -cost_via / config.logit_temperature
+        logits = -cost_via / config.logit_temperature \
+            + params.route_bias[:, :, :cost_via.shape[2]]
         has_outlinks = config.node_n_outlinks > 0  # (n_nodes,)
         logits = jnp.where(
             ~has_outlinks[None, :, None],
@@ -2548,8 +2557,8 @@ def world_to_jax(W):
     absorption_ratio = np.array([n.absorption_ratio for n in W.NODES], dtype=np.float32)
     lengths = np.array([l.length for l in W.LINKS], dtype=np.float32)
 
-    # DUO: destinations and per-OD demand
-    destinations = list(set(dest for _, dest, _, _, _ in W.demand_info)) if W.demand_info else []
+    # DUO: destinations and per-OD demand (sorted for a stable ordering across runs)
+    destinations = sorted(set(dest for _, dest, _, _, _ in W.demand_info)) if W.demand_info else []
     dest_ids = np.array([W.NODES_NAME_DICT[d].id for d in destinations], dtype=np.int32) if destinations else np.array([0], dtype=np.int32)
     n_dests = max(len(destinations), 1)
 
@@ -2621,6 +2630,9 @@ def world_to_jax(W):
         turning_fractions=jnp.array(tf),
         od_demand_rate=jnp.array(od_demand_rate),
         toll=jnp.array(toll_arr),
+        route_bias=jnp.zeros((od_demand_rate.shape[1],
+                              od_demand_rate.shape[0],
+                              tf.shape[2]), dtype=jnp.float32),
     )
 
     return params, config

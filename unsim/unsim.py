@@ -585,6 +585,17 @@ class Link:
             s.q_star = s.capacity
             s.k_star = s.capacity / s.u
 
+        # Record which FD quantities are independent (provenance).
+        # "u_kappa_tau": (u, kappa, tau) independent; w and q* derived.
+        # "u_w_capacity": (u, w, q*) independent; kappa derived.
+        # "u_w_tau": (u, w, tau) independent; kappa and q* derived.
+        if capacity is not None:
+            s.fd_parameterization = "u_w_capacity"
+        elif backward_wave_speed is not None:
+            s.fd_parameterization = "u_w_tau"
+        else:
+            s.fd_parameterization = "u_kappa_tau"
+
         s.offset_u = None
         s.offset_w = None
         s.cum_arrival = None
@@ -954,6 +965,46 @@ class Link:
         return f"<Link '{s.name}'>"
 
 
+class Demand:
+    """One OD traffic demand declaration.
+
+    Returned by ``World.adddemand()`` so that each declaration can be referenced individually, e.g. as a differentiation target.
+
+    Parameters
+    ----------
+    W : World
+        Parent world.
+    orig : str
+        Origin node name.
+    dest : str
+        Destination node name.
+    t_start : float
+        Demand start time (s).
+    t_end : float
+        Demand end time (s).
+    flow : float
+        Demand flow rate (veh/s).
+
+    Attributes
+    ----------
+    id : int
+        Index of this declaration in ``World.DEMANDS``.
+    """
+
+    def __init__(s, W, orig, dest, t_start, t_end, flow):
+        s.W = W
+        s.orig = orig
+        s.dest = dest
+        s.t_start = t_start
+        s.t_end = t_end
+        s.flow = flow
+        s.id = len(W.DEMANDS)
+        W.DEMANDS.append(s)
+
+    def __repr__(s):
+        return f"<Demand {s.orig}->{s.dest} [{s.t_start}, {s.t_end}) flow={s.flow}>"
+
+
 class World:
     """Simulation world managing nodes, links, demand, and execution.
 
@@ -1009,6 +1060,7 @@ class World:
         s.NODES_NAME_DICT = {}
         s.LINKS_NAME_DICT = {}
         s.demand_info = []
+        s.DEMANDS = []
 
         s.TSIZE = 0
         s.T = 0
@@ -1158,6 +1210,11 @@ class World:
             Demand flow rate (veh/s). Specify either flow or volume.
         volume : float, optional
             Total demand volume (veh). Converted to flow internally.
+
+        Returns
+        -------
+        Demand
+            The created demand declaration.
         """
         if not isinstance(orig, str):
             orig = orig.name
@@ -1166,6 +1223,19 @@ class World:
         if volume > 0 and flow < 0:
             flow = volume / (t_end - t_start)
         s.demand_info.append((orig, dest, t_start, t_end, flow))
+        return Demand(s, orig, dest, t_start, t_end, flow)
+
+    def set_toll(s, link, profile):
+        """Set a time-dependent congestion pricing toll on a link.
+
+        Parameters
+        ----------
+        link : Link or str
+            Target link (or its name).
+        profile : callable
+            Function of time (s) returning the toll value in seconds (time equivalent), e.g. an ``api.PiecewiseConstant``.
+        """
+        s.get_link(link).congestion_pricing = profile
 
     def _compute_shortest_paths(s):
         """Compute shortest paths by free-flow time for all OD pairs using Dijkstra."""
@@ -1361,7 +1431,8 @@ class World:
 
         # DUO / AON initialization (per-destination tracking)
         if s.ROUTE_CHOICE in ("duo", "duo_multipoint", "duo_logit", "aon"):
-            s._destinations = list(set(dest for _, dest, _, _, _ in s.demand_info))
+            # Sorted for a stable destination-axis ordering across runs.
+            s._destinations = sorted(set(dest for _, dest, _, _, _ in s.demand_info))
             s._od_demands = {}  # {(orig, dest): [(t_start, t_end, flow)]}
             for orig, dest, t_start, t_end, flow in s.demand_info:
                 s._od_demands.setdefault((orig, dest), []).append((t_start, t_end, flow))
@@ -1488,6 +1559,31 @@ class World:
         s.analyzer = Analyzer(s)
 
         s.finalized = True
+
+    def compile(s, backend="jax", route_update_interval=None, toll_interval=None):
+        """Compile the world into an immutable differentiable model.
+
+        Creates a snapshot of the current network, parameters, and demand, and returns a facade for JAX-based simulation, sensitivity analysis, and optimization.
+        Later modifications to this World do not affect the returned model.
+
+        Parameters
+        ----------
+        backend : str, optional
+            Simulation backend. Only "jax" is supported.
+        route_update_interval : float or None, optional
+            Route update interval (s) for DUO route choice. None (default) uses the built-in default (300 s).
+        toll_interval : float or None, optional
+            Toll discretization interval (s), independent of the route update interval. None couples it to the route update interval.
+
+        Returns
+        -------
+        DifferentiableWorld
+            Compiled model facade.
+        """
+        from .api import DifferentiableWorld
+        return DifferentiableWorld(s, backend=backend,
+                                   route_update_interval=route_update_interval,
+                                   toll_interval=toll_interval)
 
     def check_simulation_ongoing(s):
         """Check if there are remaining timesteps to simulate.

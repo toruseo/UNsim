@@ -5,8 +5,6 @@ Computes gradients of total travel time with respect to:
 - demand flow rates
 - free-flow speed
 - merge priority
-
-Requires JAX: pip install jax[cpu]
 """
 
 import sys, os
