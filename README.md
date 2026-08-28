@@ -1,4 +1,4 @@
-# UNsim: Differentiable network traffic simulation in Python
+# UNsim: Python traffic simulation with Autodiff
 
 [![PyPi](https://img.shields.io/pypi/v/unsim.svg)](https://pypi.python.org/pypi/unsim)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.11380-b31b1b.svg)](https://doi.org/10.48550/arXiv.2604.11380)
@@ -13,7 +13,7 @@
 
 - Simple, lightweight, and easy-to-use Python implementation of modern standard models of dynamic network traffic flow
 - An end-to-end differentiable simulation using JAX
-- Lightning-fast JAX mode mode with a GPU: 0.3 sec for forward simulation on the Chicago-Sketch dataset (2500 links, 1 million vehicles, 3 hours), and 0.5 sec for backward differentiation
+- Lightning-fast JAX mode mode with a GPU: 0.3 sec for forward simulation on the Chicago-Sketch dataset (2500 links, 1 million vehicles, 3 hours), and 1.5 sec for backward differentiation, with 2GB VRAM (on RTX 5060 Ti).
 - The basic features and syntax are almost identical to those of the [UXsim](https://github.com/toruseo/UXsim) traffic flow simulator
 
 ## Simulation Examples
