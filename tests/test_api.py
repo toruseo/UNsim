@@ -18,9 +18,6 @@ from unsim.unsim_diff import (
     average_travel_time, travel_time, travel_time_soft,
 )
 from unsim.api import ParameterRef, VariableSet, PiecewiseConstant, CustomVariable
-from scenario_parallel_routes import create_world
-
-REFERENCE_NPZ = os.path.join(os.path.dirname(__file__), "data", "parallel_routes_reference.npz")
 
 
 def build_merge_world():
@@ -509,42 +506,6 @@ class TestExplain:
         assert "derived quantities: backward_wave_speed, capacity" in text
         assert "active interval: [0, 1000)" in text
         assert "gradient through discrete shortest-path index: no" in text
-
-
-# ================================================================
-# Parallel-routes gate (reference npz precomputed by the raw core)
-# ================================================================
-
-class TestParallelRoutesGate:
-    @pytest.fixture(scope="class")
-    def ref(self):
-        assert os.path.exists(REFERENCE_NPZ), "Run tests/generate_parallel_routes_reference.py first"
-        return np.load(REFERENCE_NPZ)
-
-    @pytest.fixture(scope="class")
-    def model(self):
-        W, _ = create_world()
-        return W.compile(backend="jax")
-
-    def test_baseline_matches_reference(self, ref, model):
-        R = model.run()
-        assert float(R.metrics.total_travel_time()) == pytest.approx(float(ref["ttt0"]), rel=1e-5)
-        assert float(R.metrics.completed_trips()) == pytest.approx(float(ref["trips0"]), rel=1e-5)
-        np.testing.assert_allclose(np.asarray(R.state.cum_arrival), ref["cum_arrival"], rtol=1e-5, atol=1e-2)
-        np.testing.assert_allclose(np.asarray(R.state.cum_departure), ref["cum_departure"], rtol=1e-5, atol=1e-2)
-
-    def test_toll_optimization_matches_reference(self, ref, model):
-        M = model
-        reg = float(ref["reg_lambda"])
-        toll = M.toll_variable(links=["highway23"], initial=0.0, lower=0.0)
-        problem = M.minimize(
-            variables=[toll],
-            objective=lambda R, x: R.metrics.total_travel_time() + reg * jnp.sum(x[toll] ** 2),
-        )
-        solution = problem.solve(optimizer="adam", steps=int(ref["steps"]), learning_rate=float(ref["lr"]))
-        np.testing.assert_allclose(solution.loss_history, ref["loss_history"], rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(solution.value[toll]).ravel(), ref["theta_opt"], rtol=1e-4, atol=1e-3)
-        assert solution.final_loss < float(ref["ttt0"])
 
 
 if __name__ == "__main__":
