@@ -7,9 +7,11 @@ API reference of UNsim. This page is under development; the contents will be exp
 
 ref_core
 ref_analyzer
+ref_api
 ref_jax
 ```
 
 - {doc}`ref_core`: Simulation core classes: `World`, `Node`, and `Link`
 - {doc}`ref_analyzer`: Result analysis and visualization: `Analyzer`
+- {doc}`ref_api`: User-friendly API for differentiable simulation
 - {doc}`ref_jax`: JAX-based differentiable simulation: `unsim.unsim_diff` module
