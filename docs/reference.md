@@ -2,14 +2,8 @@
 
 API reference of UNsim. This page is under development; the contents will be expanded.
 
-```{toctree}
-:maxdepth: 2
-
-ref_core
-ref_analyzer
-ref_api
-ref_jax
-```
+Note that some of the contests (especially for differentiable simulation) are too detailed and not very human friendly. 
+Please see the {doc}`tutorial <tutorial>` first. 
 
 - {doc}`ref_core`: Simulation core classes: `World`, `Node`, and `Link`
 - {doc}`ref_analyzer`: Result analysis and visualization: `Analyzer`
