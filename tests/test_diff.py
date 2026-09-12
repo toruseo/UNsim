@@ -735,8 +735,8 @@ class TestGradient:
         prior_dQ_dp = jax.grad(lambda pr: jnp.sum(self._prior_merge_2inlinks(D, pr, S)))(p)
         prior_dQ_dS = jax.grad(lambda s: jnp.sum(self._prior_merge_2inlinks(D, p, s)))(S)
 
-        assert jnp.allclose(prior_dQ_dD, [0.0, 0.0], atol=1e-5)
-        assert jnp.allclose(prior_dQ_dp, [0.0, 0.0], atol=1e-5)
+        assert jnp.allclose(prior_dQ_dD, jnp.array([0.0, 0.0]), atol=1e-5)
+        assert jnp.allclose(prior_dQ_dp, jnp.array([0.0, 0.0]), atol=1e-5)
         assert jnp.allclose(prior_dQ_dS, 1.0, atol=1e-5)
 
     def test_grad_merge_2inlinks_vs_prior_uncongested(self):
@@ -753,8 +753,8 @@ class TestGradient:
         curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
         curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
 
-        assert jnp.allclose(prior_dQ_dD, [1.0, 1.0], atol=1e-5)
-        assert jnp.allclose(prior_dQ_dp, [0.0, 0.0], atol=1e-5)
+        assert jnp.allclose(prior_dQ_dD, jnp.array([1.0, 1.0]), atol=1e-5)
+        assert jnp.allclose(prior_dQ_dp, jnp.array([0.0, 0.0]), atol=1e-5)
         assert jnp.allclose(prior_dQ_dS, 0.0, atol=1e-5)
 
         assert jnp.allclose(curr_dQ_dD, prior_dQ_dD, atol=1e-5)
@@ -775,8 +775,8 @@ class TestGradient:
         curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
         curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
 
-        assert jnp.allclose(prior_dQ_dD, [0.0, 0.0], atol=1e-5)
-        assert jnp.allclose(prior_dQ_dp, [0.0, 0.0], atol=1e-5)
+        assert jnp.allclose(prior_dQ_dD, jnp.array([0.0, 0.0]), atol=1e-5)
+        assert jnp.allclose(prior_dQ_dp, jnp.array([0.0, 0.0]), atol=1e-5)
         assert jnp.allclose(prior_dQ_dS, 1.0, atol=1e-5)
 
         assert jnp.allclose(curr_dQ_dD, prior_dQ_dD, atol=1e-5)
@@ -795,8 +795,8 @@ class TestGradient:
         curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
         curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
 
-        assert jnp.allclose(curr_dQ_dD, [0.0, 0.0], atol=1e-4), f"Expected dQ/dD=[0, 0], got {curr_dQ_dD}"
-        assert jnp.allclose(curr_dQ_dp, [0.0, 0.0], atol=1e-4), f"Expected dQ/dp=[0, 0], got {curr_dQ_dp}"
+        assert jnp.allclose(curr_dQ_dD, jnp.array([0.0, 0.0]), atol=1e-4), f"Expected dQ/dD=[0, 0], got {curr_dQ_dD}"
+        assert jnp.allclose(curr_dQ_dp, jnp.array([0.0, 0.0]), atol=1e-4), f"Expected dQ/dp=[0, 0], got {curr_dQ_dp}"
         assert jnp.isclose(float(curr_dQ_dS), 1.0, atol=1e-4), f"Expected dQ/dS=1.0, got {curr_dQ_dS}"
 
     def test_grad_merge_3inlinks_boundary(self):
