@@ -114,7 +114,7 @@ For the details, please see the [arXiv preprint](https://doi.org/10.48550/arXiv.
 
 ## Terms of Use & License
 
-UNsim is released under the Apache License 2.0. See the LICENSE file for the full terms and conditions.
+UNsim is released under the Apache License 2.0. You are free to use it as long as the source is acknowledged.
 
 If you use the code, please cite the arXiv article:
 - Toru Seo. [End-to-end differentiable network traffic simulation with dynamic route choice](https://doi.org/10.48550/arXiv.2604.11380). arXiv preprint arXiv:2604.11380, 2026.
