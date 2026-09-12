@@ -564,7 +564,10 @@ def compute_node_transfers(t_index, demands, supplies, state, params, config):
     S_merge = jnp.minimum(out_sup[:, 0], fc)  # (n_nodes,)
     total_D = jnp.sum(jnp.where(in_valid, in_dem, 0.0), axis=1)  # (n_nodes,)
     p = jnp.where(in_valid, params.merge_priority[safe_in], 0.0)  # (n_nodes, max_in)
-    alphas = p / jnp.maximum(jnp.sum(p, axis=1, keepdims=True), 1e-10)
+    total_p = jnp.sum(p, axis=1, keepdims=True)
+    has_p = total_p > 0.0
+    safe_total_p = jnp.where(has_p, total_p, 1.0)
+    alphas = jnp.where(has_p, p / safe_total_p, 0.0)
 
     base_q = jnp.minimum(in_dem, alphas * S_merge[:, None])
     rem_S = jnp.maximum(S_merge - jnp.sum(jnp.where(in_valid, base_q, 0.0), axis=1), 0.0)
