@@ -560,27 +560,19 @@ def compute_node_transfers(t_index, demands, supplies, state, params, config):
     dummy_inflow = dummy_flow * pass_ratio
     dummy_absorbed = dummy_flow * params.absorption_ratio * dt  # (n_nodes,)
 
-    # ---- Merge (type=3): 2-input mid-value formula ----
-    D1 = in_dem[:, 0]  # (n_nodes,)
-    if config.max_in >= 2:
-        D2 = jnp.where(n_in >= 2, in_dem[:, 1], 0.0)  # (n_nodes,)
-        safe_in1 = safe_in[:, 1]
-    else:
-        D2 = jnp.zeros(n_nodes, dtype=jnp.float32)
-        safe_in1 = jnp.zeros(n_nodes, dtype=jnp.int32)
+    # ---- Merge (type=3) ----
     S_merge = jnp.minimum(out_sup[:, 0], fc)  # (n_nodes,)
-    p1 = params.merge_priority[safe_in[:, 0]]  # (n_nodes,)
-    p2 = params.merge_priority[safe_in1]        # (n_nodes,)
-    total_p = p1 + p2
-    a1 = p1 / jnp.maximum(total_p, 1e-10)
-    a2 = p2 / jnp.maximum(total_p, 1e-10)
+    total_D = jnp.sum(jnp.where(in_valid, in_dem, 0.0), axis=1)  # (n_nodes,)
+    p = jnp.where(in_valid, params.merge_priority[safe_in], 0.0)  # (n_nodes, max_in)
+    alphas = p / jnp.maximum(jnp.sum(p, axis=1, keepdims=True), 1e-10)
 
-    total_D = D1 + D2
-    q1_cong = jnp.maximum(differentiable_mid(D1, S_merge - D2, a1 * S_merge), 0.0)
-    q2_cong = jnp.maximum(differentiable_mid(D2, S_merge - D1, a2 * S_merge), 0.0)
-    merge_q1 = jnp.where(total_D <= S_merge, D1, q1_cong)  # (n_nodes,)
-    merge_q2 = jnp.where(total_D <= S_merge, D2, q2_cong)  # (n_nodes,)
-    merge_q3 = merge_q1 + merge_q2  # (n_nodes,)
+    base_q = jnp.minimum(in_dem, alphas * S_merge[:, None])
+    rem_S = jnp.maximum(S_merge - jnp.sum(jnp.where(in_valid, base_q, 0.0), axis=1), 0.0)
+    surplus_cap = jnp.where(in_valid, in_dem - base_q, 0.0)
+    cum_surplus = jnp.cumsum(surplus_cap, axis=1)
+    extra_q = jnp.minimum(surplus_cap, jnp.maximum(rem_S[:, None] - (cum_surplus - surplus_cap), 0.0))
+    merge_q_all = jnp.where(total_D[:, None] <= S_merge[:, None], in_dem, base_q + extra_q)  # (n_nodes, max_in)
+    merge_q_out = jnp.sum(jnp.where(in_valid, merge_q_all, 0.0), axis=1)  # (n_nodes,)
 
     # ---- Diverge (type=4) ----
     D_div = in_dem[:, 0]  # (n_nodes,)
@@ -648,11 +640,7 @@ def compute_node_transfers(t_index, demands, supplies, state, params, config):
 
     out_val_dest = dest_outflows  # (n_nodes, max_in)
     out_val_dummy = jnp.where(j_in == 0, dummy_outflow[:, None], 0.0)
-    if config.max_in >= 2:
-        out_val_merge = jnp.where(j_in == 0, merge_q1[:, None],
-                        jnp.where(j_in == 1, merge_q2[:, None], 0.0))
-    else:
-        out_val_merge = jnp.where(j_in == 0, merge_q1[:, None], 0.0)
+    out_val_merge = merge_q_all
     out_val_diverge = jnp.where(j_in == 0, div_flow[:, None], 0.0)
     out_val_general = inm_q_in_all
 
@@ -665,7 +653,7 @@ def compute_node_transfers(t_index, demands, supplies, state, params, config):
     # ---- Dispatch by node type: inflows for outlinks (n_nodes, max_out) ----
     in_val_origin = origin_inflows  # (n_nodes, max_out)
     in_val_dummy = jnp.where(j_out == 0, dummy_inflow[:, None], 0.0)
-    in_val_merge = jnp.where(j_out == 0, merge_q3[:, None], 0.0)
+    in_val_merge = jnp.where(j_out == 0, merge_q_out[:, None], 0.0)
     in_val_diverge = div_outflows_per_link  # (n_nodes, max_out)
     in_val_general = inm_q_out_all
 

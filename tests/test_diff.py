@@ -157,6 +157,32 @@ class TestNumericalAgreement:
         ttt_jax = float(total_travel_time(state, config))
         assert equal_tolerance(ttt_jax, ttt_orig)
 
+    def test_merge_3inlinks(self):
+        """3-to-1 merge, multiple priorities and congestion (Issue #18)."""
+        def factory():
+            W = World(name="", deltat=5, tmax=1200, print_mode=0)
+            W.addNode("orig1", 0, 0)
+            W.addNode("orig2", 0, 2)
+            W.addNode("orig3", 0, 4)
+            W.addNode("merge", 1, 2)
+            W.addNode("dest", 2, 2)
+            W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=2)
+            W.addLink("link3", "orig3", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link4", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.adddemand("orig1", "dest", 0, 1000, 0.4)
+            W.adddemand("orig2", "dest", 0, 1000, 0.4)
+            W.adddemand("orig3", "dest", 0, 1000, 0.4)
+            return W
+
+        W, params, config, state = run_both(factory)
+        ttt_orig = W.analyzer.total_travel_time
+        ttt_jax = float(total_travel_time(state, config))
+        assert equal_tolerance(ttt_jax, ttt_orig)
+
     def test_diverge(self):
         """1-to-2 diverge."""
         def factory():
