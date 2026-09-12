@@ -320,6 +320,229 @@ class TestNumericalAgreement:
         ttt_jax = float(total_travel_time(state, config))
         assert equal_tolerance(ttt_jax, ttt_orig)
 
+    @staticmethod
+    def _assert_all_equal_tolerance(val_arr, check_arr, rel_tol=0.1, abs_tol=0.1, err_msg=""):
+        """Check that all elements in val_arr match check_arr using equal_tolerance."""
+        val_flat = jnp.ravel(val_arr)
+        check_flat = jnp.ravel(check_arr)
+        assert len(val_flat) == len(check_flat), f"Length mismatch: {len(val_flat)} vs {len(check_flat)}"
+        mismatches = []
+        for idx, (v, c) in enumerate(zip(val_flat, check_flat)):
+            if not equal_tolerance(float(v), float(c), rel_tol=rel_tol, abs_tol=abs_tol):
+                mismatches.append((idx, float(v), float(c)))
+        if mismatches:
+            details = ", ".join([f"idx {i}: val={v:.4f} vs check={c:.4f}" for i, v, c in mismatches])
+            raise AssertionError(f"{err_msg} Mismatches found (showing first {len(mismatches)}): {details}")
+
+    def _check_linkwise(self, W, state, config, rel_tol=0.1, abs_tol=0.5):
+        for link_id, link in enumerate(W.LINKS):
+            orig_ca = jnp.array(link.cum_arrival)
+            jax_ca = jnp.array(state.cum_arrival[link_id])
+            self._assert_all_equal_tolerance(
+                jax_ca, orig_ca, rel_tol=rel_tol, abs_tol=abs_tol,
+                err_msg=f"Link {link.name} (id={link_id}) cum_arrival mismatch:"
+            )
+
+            orig_cd = jnp.array(link.cum_departure)
+            jax_cd = jnp.array(state.cum_departure[link_id])
+            self._assert_all_equal_tolerance(
+                jax_cd, orig_cd, rel_tol=rel_tol, abs_tol=abs_tol,
+                err_msg=f"Link {link.name} (id={link_id}) cum_departure mismatch:"
+            )
+
+    @staticmethod
+    def _merge_node_jax_formula(D, p, S):
+        """Merge node calculation matching unsim_diff.py."""
+        total_D = jnp.sum(D)
+        alphas = p / jnp.maximum(jnp.sum(p), 1e-10)
+        base_q = jnp.minimum(D, alphas * S)
+        rem_S = jnp.maximum(S - jnp.sum(base_q), 0.0)
+        surplus_cap = D - base_q
+        cum_surplus = jnp.cumsum(surplus_cap)
+        extra_q = jnp.minimum(surplus_cap, jnp.maximum(rem_S - (cum_surplus - surplus_cap), 0.0))
+        merge_q = jnp.where(total_D <= S, D, base_q + extra_q)
+        return merge_q
+
+    def test_merge_2inlinks_fair_linkwise(self):
+        """2-to-1 merge, equal priority: check every link's cumulative arrival and departure."""
+        def factory():
+            W = World(name="", deltat=5, tmax=1200, print_mode=0)
+            W.addNode("orig1", 0, 0)
+            W.addNode("orig2", 0, 2)
+            W.addNode("merge", 1, 1)
+            W.addNode("dest", 2, 1)
+            W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link3", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.adddemand("orig1", "dest", 0, 1000, 0.5)
+            W.adddemand("orig2", "dest", 0, 1000, 0.5)
+            return W
+
+        W, params, config, state = run_both(factory)
+        self._check_linkwise(W, state, config)
+
+    def test_merge_2inlinks_unfair_linkwise(self):
+        """2-to-1 merge, priority 1:2: check every link's cumulative arrival and departure."""
+        def factory():
+            W = World(name="", deltat=5, tmax=1200, print_mode=0)
+            W.addNode("orig1", 0, 0)
+            W.addNode("orig2", 0, 2)
+            W.addNode("merge", 1, 1)
+            W.addNode("dest", 2, 1)
+            W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=2)
+            W.addLink("link3", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.adddemand("orig1", "dest", 0, 1000, 0.8)
+            W.adddemand("orig2", "dest", 0, 1000, 0.8)
+            return W
+
+        W, params, config, state = run_both(factory)
+        self._check_linkwise(W, state, config)
+
+    def test_merge_3inlinks_linkwise(self):
+        """3-to-1 merge (Issue #18): check every link's cumulative arrival and departure."""
+        def factory():
+            W = World(name="", deltat=5, tmax=1200, print_mode=0)
+            W.addNode("orig1", 0, 0)
+            W.addNode("orig2", 0, 2)
+            W.addNode("orig3", 0, 4)
+            W.addNode("merge", 1, 2)
+            W.addNode("dest", 2, 2)
+            W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=2)
+            W.addLink("link3", "orig3", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link4", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.adddemand("orig1", "dest", 0, 1000, 0.4)
+            W.adddemand("orig2", "dest", 0, 1000, 0.4)
+            W.adddemand("orig3", "dest", 0, 1000, 0.4)
+            return W
+
+        W, params, config, state = run_both(factory)
+        self._check_linkwise(W, state, config)
+
+    def test_merge_surplus_reallocation_linkwise(self):
+        """3-to-1 merge with surplus supply reallocation: link1 demand < alpha1 * S."""
+        def factory():
+            W = World(name="", deltat=5, tmax=1200, print_mode=0)
+            W.addNode("orig1", 0, 0)
+            W.addNode("orig2", 0, 2)
+            W.addNode("orig3", 0, 4)
+            W.addNode("merge", 1, 2)
+            W.addNode("dest", 2, 2)
+            W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link3", "orig3", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link4", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.adddemand("orig1", "dest", 0, 1000, 0.1)
+            W.adddemand("orig2", "dest", 0, 1000, 0.5)
+            W.adddemand("orig3", "dest", 0, 1000, 0.5)
+            return W
+
+        W, params, config, state = run_both(factory)
+        self._check_linkwise(W, state, config)
+
+    def test_merge_4inlinks_linkwise(self):
+        """4-to-1 merge: check link-wise cumulative counts for 4 inlinks."""
+        def factory():
+            W = World(name="", deltat=5, tmax=1200, print_mode=0)
+            for i in range(1, 5):
+                W.addNode(f"orig{i}", 0, i * 2)
+            W.addNode("merge", 1, 4)
+            W.addNode("dest", 2, 4)
+            priorities = [1, 2, 1, 3]
+            for i in range(1, 5):
+                W.addLink(f"link{i}", f"orig{i}", "merge", length=1000, free_flow_speed=20,
+                           jam_density=0.2, merge_priority=priorities[i-1])
+            W.addLink("link_out", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+            for i in range(1, 5):
+                W.adddemand(f"orig{i}", "dest", 0, 1000, 0.3)
+            return W
+
+        W, params, config, state = run_both(factory)
+        self._check_linkwise(W, state, config)
+
+    @pytest.mark.parametrize("scale", [1e-12, 1e-6, 1e-3, 0.1, 0.5, 2.0, 10.0, 1e3, 1e6])
+    def test_priority_scale_invariance_formula(self, scale):
+        """Direct formula check: flows must be invariant when scaling p by any positive factor."""
+        D = jnp.array([0.6, 0.8, 0.7])
+        p_base = jnp.array([1.0, 2.0, 3.0])
+        S = jnp.float32(1.0)
+
+        p_scaled = p_base * scale
+
+        flow_base = jnp.array(self._merge_node_jax_formula(D, p_base, S))
+        flow_scaled = jnp.array(self._merge_node_jax_formula(D, p_scaled, S))
+
+        self._assert_all_equal_tolerance(flow_scaled, flow_base, rel_tol=1e-4, abs_tol=1e-5)
+
+    def test_tiny_priority_allocation(self):
+        """Review comment P2: tiny priority must preserve true allocation ratio 1:2:1 -> [0.25, 0.5, 0.25]."""
+        D = jnp.array([1.0, 1.0, 1.0])
+        p_tiny = jnp.array([1e-12, 2e-12, 1e-12])
+        S = jnp.float32(1.0)
+
+        flows = jnp.array(self._merge_node_jax_formula(D, p_tiny, S))
+        expected = jnp.array([0.25, 0.50, 0.25])
+        assert jnp.allclose(flows, expected, atol=1e-4), f"Expected {expected}, got {flows}"
+
+    @pytest.mark.parametrize("scale", [1e-12, 1e-3, 0.1, 2.0, 10.0, 1e3])
+    def test_simulation_scale_invariance(self, scale):
+        """Simulation check: scaling merge priority by constant k should not change simulation results."""
+        def factory(priority_multiplier=1.0):
+            W = World(name="", deltat=5, tmax=1200, print_mode=0)
+            W.addNode("orig1", 0, 0)
+            W.addNode("orig2", 0, 2)
+            W.addNode("orig3", 0, 4)
+            W.addNode("merge", 1, 2)
+            W.addNode("dest", 2, 2)
+            W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1.0 * priority_multiplier)
+            W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=2.0 * priority_multiplier)
+            W.addLink("link3", "orig3", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1.0 * priority_multiplier)
+            W.addLink("link4", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.adddemand("orig1", "dest", 0, 1000, 0.4)
+            W.adddemand("orig2", "dest", 0, 1000, 0.4)
+            W.adddemand("orig3", "dest", 0, 1000, 0.4)
+            return W
+
+        W_base = factory(1.0)
+        params_base, config_base = world_to_jax(W_base)
+        state_base = simulate(params_base, config_base)
+
+        W_scaled = factory(scale)
+        params_scaled, config_scaled = world_to_jax(W_scaled)
+        state_scaled = simulate(params_scaled, config_scaled)
+
+        ttt_base = float(total_travel_time(state_base, config_base))
+        ttt_scaled = float(total_travel_time(state_scaled, config_scaled))
+        assert equal_tolerance(ttt_scaled, ttt_base, rel_tol=1e-4, abs_tol=1e-3)
+
+        for link_id in range(config_base.n_links):
+            self._assert_all_equal_tolerance(
+                jnp.array(state_scaled.cum_arrival[link_id]),
+                jnp.array(state_base.cum_arrival[link_id]),
+                rel_tol=1e-4, abs_tol=1e-3,
+                err_msg=f"scale {scale} cum_arrival link {link_id} mismatch:"
+            )
+            self._assert_all_equal_tolerance(
+                jnp.array(state_scaled.cum_departure[link_id]),
+                jnp.array(state_base.cum_departure[link_id]),
+                rel_tol=1e-4, abs_tol=1e-3,
+                err_msg=f"scale {scale} cum_departure link {link_id} mismatch:"
+            )
+
 
 # ================================================================
 # Gradient tests
@@ -443,6 +666,154 @@ class TestGradient:
         assert jnp.allclose(
             state_nojit.cum_departure, state_jit.cum_departure, atol=1e-5
         )
+
+
+    @staticmethod
+    def _prior_merge_2inlinks(D, p, S):
+        """Prior implementation from e66a512~1 using differentiable_mid."""
+        D1, D2 = D[0], D[1]
+        p1, p2 = p[0], p[1]
+        total_p = p1 + p2
+        a1 = p1 / jnp.sum(p)
+        a2 = p2 / jnp.sum(p)
+        total_D = D1 + D2
+        def mid(a, b, c):
+            return a + b + c - jnp.minimum(a, jnp.minimum(b, c)) - jnp.maximum(a, jnp.maximum(b, c))
+        q1_cong = jnp.maximum(mid(D1, S - D2, a1 * S), 0.0)
+        q2_cong = jnp.maximum(mid(D2, S - D1, a2 * S), 0.0)
+        q1 = jnp.where(total_D <= S, D1, q1_cong)
+        q2 = jnp.where(total_D <= S, D2, q2_cong)
+        return jnp.array([q1, q2])
+
+    @staticmethod
+    def _merge_node_jax_formula(D, p, S):
+        """Merge node calculation matching unsim_diff.py."""
+        total_D = jnp.sum(D)
+        alphas = p / jnp.sum(p)
+        base_q = jnp.minimum(D, alphas * S)
+        rem_S = jnp.maximum(S - jnp.sum(base_q), 0.0)
+        surplus_cap = D - base_q
+        cum_surplus = jnp.cumsum(surplus_cap)
+        extra_q = jnp.minimum(surplus_cap, jnp.maximum(rem_S - (cum_surplus - surplus_cap), 0.0))
+        merge_q = jnp.where(total_D <= S, D, base_q + extra_q)
+        return merge_q
+
+    def test_grad_merge_2inlinks_vs_prior_smooth(self):
+        """Compare gradients with prior implementation at a smooth congested point.
+
+        D = [0.8, 0.8], p = [1.0, 2.0], S = 1.0.
+        Both inlinks are bottlenecked, alphas = [1/3, 2/3].
+        Check dQ/dD, dQ/dp, dQ/dS.
+        """
+        D = jnp.array([0.8, 0.8])
+        p = jnp.array([1.0, 2.0])
+        S = jnp.float32(1.0)
+
+        prior_dQ_dD = jax.grad(lambda d: jnp.sum(self._prior_merge_2inlinks(d, p, S)))(D)
+        prior_dQ_dp = jax.grad(lambda pr: jnp.sum(self._prior_merge_2inlinks(D, pr, S)))(p)
+        prior_dQ_dS = jax.grad(lambda s: jnp.sum(self._prior_merge_2inlinks(D, p, s)))(S)
+
+        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
+        curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
+        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+
+        assert jnp.allclose(prior_dQ_dD, 0.0, atol=1e-5)
+        assert jnp.allclose(prior_dQ_dp, 0.0, atol=1e-5)
+        assert jnp.allclose(prior_dQ_dS, 1.0, atol=1e-5)
+
+        assert jnp.allclose(curr_dQ_dD, prior_dQ_dD, atol=1e-5)
+        assert jnp.allclose(curr_dQ_dp, prior_dQ_dp, atol=1e-5)
+        assert jnp.allclose(curr_dQ_dS, prior_dQ_dS, atol=1e-5)
+
+    def test_grad_merge_2inlinks_prior_at_boundary(self):
+        """Verify prior implementation has correct gradients at boundary point D[0] == alpha[0]*S."""
+        D = jnp.array([0.5, 1.0])
+        p = jnp.array([1.0, 1.0])
+        S = jnp.float32(1.0)
+
+        prior_dQ_dD = jax.grad(lambda d: jnp.sum(self._prior_merge_2inlinks(d, p, S)))(D)
+        prior_dQ_dp = jax.grad(lambda pr: jnp.sum(self._prior_merge_2inlinks(D, pr, S)))(p)
+        prior_dQ_dS = jax.grad(lambda s: jnp.sum(self._prior_merge_2inlinks(D, p, s)))(S)
+
+        assert jnp.allclose(prior_dQ_dD, [0.0, 0.0], atol=1e-5)
+        assert jnp.allclose(prior_dQ_dp, [0.0, 0.0], atol=1e-5)
+        assert jnp.allclose(prior_dQ_dS, 1.0, atol=1e-5)
+
+    def test_grad_merge_2inlinks_vs_prior_uncongested(self):
+        """Compare gradients with prior implementation in uncongested regime."""
+        D = jnp.array([0.3, 0.4])
+        p = jnp.array([1.0, 1.0])
+        S = jnp.float32(1.0)
+
+        prior_dQ_dD = jax.grad(lambda d: jnp.sum(self._prior_merge_2inlinks(d, p, S)))(D)
+        prior_dQ_dp = jax.grad(lambda pr: jnp.sum(self._prior_merge_2inlinks(D, pr, S)))(p)
+        prior_dQ_dS = jax.grad(lambda s: jnp.sum(self._prior_merge_2inlinks(D, p, s)))(S)
+
+        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
+        curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
+        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+
+        assert jnp.allclose(prior_dQ_dD, [1.0, 1.0], atol=1e-5)
+        assert jnp.allclose(prior_dQ_dp, [0.0, 0.0], atol=1e-5)
+        assert jnp.allclose(prior_dQ_dS, 0.0, atol=1e-5)
+
+        assert jnp.allclose(curr_dQ_dD, prior_dQ_dD, atol=1e-5)
+        assert jnp.allclose(curr_dQ_dp, prior_dQ_dp, atol=1e-5)
+        assert jnp.allclose(curr_dQ_dS, prior_dQ_dS, atol=1e-5)
+
+    def test_grad_merge_2inlinks_vs_prior_one_under_capacity(self):
+        """Compare gradients when one link is under priority share, taking residual supply."""
+        D = jnp.array([0.2, 0.9])
+        p = jnp.array([1.0, 1.0])
+        S = jnp.float32(1.0)
+
+        prior_dQ_dD = jax.grad(lambda d: jnp.sum(self._prior_merge_2inlinks(d, p, S)))(D)
+        prior_dQ_dp = jax.grad(lambda pr: jnp.sum(self._prior_merge_2inlinks(D, pr, S)))(p)
+        prior_dQ_dS = jax.grad(lambda s: jnp.sum(self._prior_merge_2inlinks(D, p, s)))(S)
+
+        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
+        curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
+        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+
+        assert jnp.allclose(prior_dQ_dD, [0.0, 0.0], atol=1e-5)
+        assert jnp.allclose(prior_dQ_dp, [0.0, 0.0], atol=1e-5)
+        assert jnp.allclose(prior_dQ_dS, 1.0, atol=1e-5)
+
+        assert jnp.allclose(curr_dQ_dD, prior_dQ_dD, atol=1e-5)
+        assert jnp.allclose(curr_dQ_dp, prior_dQ_dp, atol=1e-5)
+        assert jnp.allclose(curr_dQ_dS, prior_dQ_dS, atol=1e-5)
+
+    def test_grad_merge_2inlinks_boundary(self):
+        """Under supply constraint at boundary D[0] == alpha[0]*S, true sensitivities must be:
+        dQ/dD = [0, 0], dQ/dp = [0, 0], dQ/dS = 1.0.
+        """
+        D = jnp.array([0.5, 1.0])
+        p = jnp.array([1.0, 1.0])
+        S = jnp.float32(1.0)
+
+        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
+        curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
+        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+
+        assert jnp.allclose(curr_dQ_dD, [0.0, 0.0], atol=1e-4), f"Expected dQ/dD=[0, 0], got {curr_dQ_dD}"
+        assert jnp.allclose(curr_dQ_dp, [0.0, 0.0], atol=1e-4), f"Expected dQ/dp=[0, 0], got {curr_dQ_dp}"
+        assert jnp.isclose(float(curr_dQ_dS), 1.0, atol=1e-4), f"Expected dQ/dS=1.0, got {curr_dQ_dS}"
+
+    def test_grad_merge_3inlinks_boundary(self):
+        """3-inlink boundary test: D = [0.25, 0.75, 0.75], p = [1.0, 1.0, 2.0], S = 1.0.
+
+        Here alpha = [0.25, 0.25, 0.50], so D[0] == alpha[0] * S = 0.25.
+        Under supply constraint, true sensitivities must be: dQ/dD[0] = 0.0, dQ/dS = 1.0.
+        """
+        D = jnp.array([0.25, 0.75, 0.75])
+        p = jnp.array([1.0, 1.0, 2.0])
+        S = jnp.float32(1.0)
+
+        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
+        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+
+        assert jnp.isclose(float(curr_dQ_dD[0]), 0.0, atol=1e-4), f"Expected dQ/dD[0]=0, got {curr_dQ_dD[0]}"
+        assert jnp.isclose(float(curr_dQ_dS), 1.0, atol=1e-4), f"Expected dQ/dS=1.0, got {curr_dQ_dS}"
 
 
 # ================================================================
