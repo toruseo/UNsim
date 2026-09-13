@@ -9,7 +9,6 @@ Requires JAX to be installed. Skipped if JAX is unavailable.
 import pytest
 import numpy as np
 import sys, os
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 try:
@@ -20,26 +19,15 @@ except (ImportError, RuntimeError):
 
 from unsim import World, equal_tolerance
 from unsim.unsim_diff import (
-    world_to_jax,
-    simulate,
-    simulate_duo,
-    total_travel_time,
-    trip_completed,
-    average_travel_time,
-    compute_N,
-    invert_interp_1d,
-    link_exit_time,
-    travel_time,
-    travel_time_auto,
-    NetworkConfig,
-    Params,
-    SimState,
+    world_to_jax, simulate, simulate_duo, total_travel_time, trip_completed,
+    average_travel_time, compute_N, invert_interp_1d, link_exit_time,
+    travel_time, travel_time_auto, NetworkConfig, Params, SimState,
 )
+
 
 # ================================================================
 # Helper
 # ================================================================
-
 
 def run_both(world_factory):
     """Run simulation with both unsim.py and unsim_diff.py, return results."""
@@ -56,25 +44,20 @@ def run_both(world_factory):
     return W, params, config, state
 
 
-
 # ================================================================
 # Numerical agreement tests
 # ================================================================
-
 
 class TestNumericalAgreement:
     """Verify JAX simulation matches original unsim.py results."""
 
     def test_1link_freeflow(self):
         """Single link, free flow."""
-
         def factory():
             W = World(name="", deltat=5, tmax=2000, print_mode=0)
             W.addNode("orig", 0, 0)
             W.addNode("dest", 1, 1)
-            W.addLink(
-                "link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-            )
+            W.addLink("link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
             W.adddemand("orig", "dest", 0, 500, 0.5)
             return W
 
@@ -83,33 +66,27 @@ class TestNumericalAgreement:
         # Cumulative counts match
         orig_ca = np.array(W.LINKS[0].cum_arrival)
         jax_ca = np.array(state.cum_arrival[0])
-        assert np.allclose(
-            orig_ca, jax_ca, atol=0.1
-        ), f"cum_arrival mismatch: max diff={np.max(np.abs(orig_ca - jax_ca))}"
+        assert np.allclose(orig_ca, jax_ca, atol=0.1), \
+            f"cum_arrival mismatch: max diff={np.max(np.abs(orig_ca - jax_ca))}"
 
         orig_cd = np.array(W.LINKS[0].cum_departure)
         jax_cd = np.array(state.cum_departure[0])
-        assert np.allclose(
-            orig_cd, jax_cd, atol=0.1
-        ), f"cum_departure mismatch: max diff={np.max(np.abs(orig_cd - jax_cd))}"
+        assert np.allclose(orig_cd, jax_cd, atol=0.1), \
+            f"cum_departure mismatch: max diff={np.max(np.abs(orig_cd - jax_cd))}"
 
         # Total travel time
         ttt_orig = W.analyzer.total_travel_time
         ttt_jax = float(total_travel_time(state, config))
-        assert equal_tolerance(
-            ttt_jax, ttt_orig
-        ), f"TTT mismatch: orig={ttt_orig}, jax={ttt_jax}"
+        assert equal_tolerance(ttt_jax, ttt_orig), \
+            f"TTT mismatch: orig={ttt_orig}, jax={ttt_jax}"
 
     def test_1link_maxflow(self):
         """Single link, overcapacity demand."""
-
         def factory():
             W = World(name="", deltat=5, tmax=2000, print_mode=0)
             W.addNode("orig", 0, 0)
             W.addNode("dest", 1, 1)
-            W.addLink(
-                "link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-            )
+            W.addLink("link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
             W.adddemand("orig", "dest", 0, 2000, 2)
             return W
 
@@ -120,18 +97,13 @@ class TestNumericalAgreement:
 
     def test_2link_bottleneck(self):
         """2-link bottleneck due to speed difference."""
-
         def factory():
             W = World(name="", deltat=5, tmax=2000, print_mode=0)
             W.addNode("orig", 0, 0)
             W.addNode("mid", 1, 1)
             W.addNode("dest", 2, 2)
-            W.addLink(
-                "link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2
-            )
-            W.addLink(
-                "link2", "mid", "dest", length=1000, free_flow_speed=10, jam_density=0.2
-            )
+            W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.addLink("link2", "mid", "dest", length=1000, free_flow_speed=10, jam_density=0.2)
             W.adddemand("orig", "dest", 0, 500, 0.8)
             W.adddemand("orig", "dest", 500, 1500, 0.4)
             return W
@@ -143,39 +115,17 @@ class TestNumericalAgreement:
 
     def test_merge_fair(self):
         """2-to-1 merge, equal priority, congestion."""
-
         def factory():
             W = World(name="", deltat=5, tmax=1200, print_mode=0)
             W.addNode("orig1", 0, 0)
             W.addNode("orig2", 0, 2)
             W.addNode("merge", 1, 1)
             W.addNode("dest", 2, 1)
-            W.addLink(
-                "link1",
-                "orig1",
-                "merge",
-                length=1000,
-                free_flow_speed=20,
-                jam_density=0.2,
-                merge_priority=1,
-            )
-            W.addLink(
-                "link2",
-                "orig2",
-                "merge",
-                length=1000,
-                free_flow_speed=20,
-                jam_density=0.2,
-                merge_priority=1,
-            )
-            W.addLink(
-                "link3",
-                "merge",
-                "dest",
-                length=1000,
-                free_flow_speed=20,
-                jam_density=0.2,
-            )
+            W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link3", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
             W.adddemand("orig1", "dest", 0, 1000, 0.5)
             W.adddemand("orig2", "dest", 0, 1000, 0.5)
             return W
@@ -187,39 +137,17 @@ class TestNumericalAgreement:
 
     def test_merge_unfair(self):
         """2-to-1 merge, priority 1:2."""
-
         def factory():
             W = World(name="", deltat=5, tmax=1200, print_mode=0)
             W.addNode("orig1", 0, 0)
             W.addNode("orig2", 0, 2)
             W.addNode("merge", 1, 1)
             W.addNode("dest", 2, 1)
-            W.addLink(
-                "link1",
-                "orig1",
-                "merge",
-                length=1000,
-                free_flow_speed=20,
-                jam_density=0.2,
-                merge_priority=1,
-            )
-            W.addLink(
-                "link2",
-                "orig2",
-                "merge",
-                length=1000,
-                free_flow_speed=20,
-                jam_density=0.2,
-                merge_priority=2,
-            )
-            W.addLink(
-                "link3",
-                "merge",
-                "dest",
-                length=1000,
-                free_flow_speed=20,
-                jam_density=0.2,
-            )
+            W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=1)
+            W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20,
+                       jam_density=0.2, merge_priority=2)
+            W.addLink("link3", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
             W.adddemand("orig1", "dest", 0, 1000, 0.8)
             W.adddemand("orig2", "dest", 0, 1000, 0.8)
             return W
@@ -286,32 +214,15 @@ class TestNumericalAgreement:
 
     def test_diverge(self):
         """1-to-2 diverge."""
-
         def factory():
             W = World(name="", deltat=5, tmax=1200, print_mode=0)
             W.addNode("orig", 0, 0)
             W.addNode("mid", 1, 1)
             W.addNode("dest1", 2, 0)
             W.addNode("dest2", 2, 2)
-            W.addLink(
-                "link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2
-            )
-            W.addLink(
-                "link2",
-                "mid",
-                "dest1",
-                length=1000,
-                free_flow_speed=20,
-                jam_density=0.2,
-            )
-            W.addLink(
-                "link3",
-                "mid",
-                "dest2",
-                length=1000,
-                free_flow_speed=20,
-                jam_density=0.2,
-            )
+            W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.addLink("link2", "mid", "dest1", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.addLink("link3", "mid", "dest2", length=1000, free_flow_speed=20, jam_density=0.2)
             W.adddemand("orig", "dest1", 0, 1000, 0.3)
             W.adddemand("orig", "dest2", 0, 1000, 0.3)
             return W
@@ -320,6 +231,7 @@ class TestNumericalAgreement:
         ttt_orig = W.analyzer.total_travel_time
         ttt_jax = float(total_travel_time(state, config))
         assert equal_tolerance(ttt_jax, ttt_orig)
+
 
     @staticmethod
     def _assert_all_equal_tolerance(val_arr, check_arr, rel_tol=0.1, abs_tol=0.1, err_msg=""):
@@ -607,7 +519,6 @@ class TestNumericalAgreement:
 # Gradient tests
 # ================================================================
 
-
 class TestGradient:
     """Verify jax.grad works and produces finite gradients."""
 
@@ -616,9 +527,7 @@ class TestGradient:
         W = World(name="", deltat=5, tmax=1000, print_mode=0)
         W.addNode("orig", 0, 0)
         W.addNode("dest", 1, 1)
-        W.addLink(
-            "link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-        )
+        W.addLink("link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
         W.adddemand("orig", "dest", 0, 500, 0.5)
 
         params, config = world_to_jax(W)
@@ -640,9 +549,7 @@ class TestGradient:
         W = World(name="", deltat=5, tmax=1000, print_mode=0)
         W.addNode("orig", 0, 0)
         W.addNode("dest", 1, 1)
-        W.addLink(
-            "link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-        )
+        W.addLink("link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
         W.adddemand("orig", "dest", 0, 500, 0.5)
 
         params, config = world_to_jax(W)
@@ -666,27 +573,11 @@ class TestGradient:
         W.addNode("orig2", 0, 2)
         W.addNode("merge", 1, 1)
         W.addNode("dest", 2, 1)
-        W.addLink(
-            "link1",
-            "orig1",
-            "merge",
-            length=1000,
-            free_flow_speed=20,
-            jam_density=0.2,
-            merge_priority=1,
-        )
-        W.addLink(
-            "link2",
-            "orig2",
-            "merge",
-            length=1000,
-            free_flow_speed=20,
-            jam_density=0.2,
-            merge_priority=2,
-        )
-        W.addLink(
-            "link3", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-        )
+        W.addLink("link1", "orig1", "merge", length=1000, free_flow_speed=20,
+                   jam_density=0.2, merge_priority=1)
+        W.addLink("link2", "orig2", "merge", length=1000, free_flow_speed=20,
+                   jam_density=0.2, merge_priority=2)
+        W.addLink("link3", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
         W.adddemand("orig1", "dest", 0, 800, 0.5)
         W.adddemand("orig2", "dest", 0, 800, 0.5)
 
@@ -706,9 +597,7 @@ class TestGradient:
         W = World(name="", deltat=5, tmax=1000, print_mode=0)
         W.addNode("orig", 0, 0)
         W.addNode("dest", 1, 1)
-        W.addLink(
-            "link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-        )
+        W.addLink("link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
         W.adddemand("orig", "dest", 0, 500, 0.5)
 
         params, config = world_to_jax(W)
@@ -722,9 +611,7 @@ class TestGradient:
         state_jit = simulate_jit(params)
 
         assert jnp.allclose(state_nojit.cum_arrival, state_jit.cum_arrival, atol=1e-5)
-        assert jnp.allclose(
-            state_nojit.cum_departure, state_jit.cum_departure, atol=1e-5
-        )
+        assert jnp.allclose(state_nojit.cum_departure, state_jit.cum_departure, atol=1e-5)
 
 
     @staticmethod
@@ -981,7 +868,6 @@ class TestGradient:
 # INM (general node) tests
 # ================================================================
 
-
 class TestINM:
     """Verify JAX INM matches Python INM and supports gradients."""
 
@@ -991,90 +877,34 @@ class TestINM:
         W.addNode("O_S", 0, 0)
         W.addNode("O_E", 2, 0)
         W.addNode("O_N", 1, 2)
-        W.addNode(
-            "intersection",
-            1,
-            1,
-            turning_fractions={
-                "P_S": {"S_N": 0.5, "S_W": 0.5},
-                "P_E": {"S_W": 1.0},
-                "P_N": {"S_W": 0.5, "S_S": 0.5},
-            },
-        )
+        W.addNode("intersection", 1, 1,
+                  turning_fractions={
+                      "P_S": {"S_N": 0.5, "S_W": 0.5},
+                      "P_E": {"S_W": 1.0},
+                      "P_N": {"S_W": 0.5, "S_S": 0.5},
+                  })
         W.addNode("D_N", 1, 3)
         W.addNode("D_W", -1, 1)
         W.addNode("D_S", 1, -1)
-        W.addLink(
-            "P_S",
-            "O_S",
-            "intersection",
-            length=1000,
-            free_flow_speed=20,
-            backward_wave_speed=5,
-            jam_density=0.2,
-            merge_priority=1.0,
-        )
-        W.addLink(
-            "P_E",
-            "O_E",
-            "intersection",
-            length=1000,
-            free_flow_speed=20,
-            backward_wave_speed=5,
-            jam_density=0.2,
-            merge_priority=0.1,
-        )
-        W.addLink(
-            "P_N",
-            "O_N",
-            "intersection",
-            length=1000,
-            free_flow_speed=20,
-            backward_wave_speed=5,
-            jam_density=0.2,
-            merge_priority=10.0,
-        )
-        W.addLink(
-            "S_N",
-            "intersection",
-            "D_N",
-            length=1000,
-            free_flow_speed=20,
-            backward_wave_speed=5,
-            jam_density=0.2,
-        )
+        W.addLink("P_S", "O_S", "intersection", length=1000,
+                  free_flow_speed=20, backward_wave_speed=5, jam_density=0.2, merge_priority=1.0)
+        W.addLink("P_E", "O_E", "intersection", length=1000,
+                  free_flow_speed=20, backward_wave_speed=5, jam_density=0.2, merge_priority=0.1)
+        W.addLink("P_N", "O_N", "intersection", length=1000,
+                  free_flow_speed=20, backward_wave_speed=5, jam_density=0.2, merge_priority=10.0)
+        W.addLink("S_N", "intersection", "D_N", length=1000,
+                  free_flow_speed=20, backward_wave_speed=5, jam_density=0.2)
         if sw_capacity is not None:
-            W.addLink(
-                "S_W",
-                "intersection",
-                "D_W",
-                length=1000,
-                free_flow_speed=20,
-                backward_wave_speed=5,
-                capacity=sw_capacity,
-            )
+            W.addLink("S_W", "intersection", "D_W", length=1000,
+                      free_flow_speed=20, backward_wave_speed=5, capacity=sw_capacity)
         else:
-            W.addLink(
-                "S_W",
-                "intersection",
-                "D_W",
-                length=1000,
-                free_flow_speed=20,
-                backward_wave_speed=5,
-                jam_density=0.2,
-            )
-        W.addLink(
-            "S_S",
-            "intersection",
-            "D_S",
-            length=1000,
-            free_flow_speed=20,
-            backward_wave_speed=5,
-            jam_density=0.2,
-        )
-        W.adddemand("O_S", "D_N", 0, 2000, 600 / 3600)
-        W.adddemand("O_E", "D_W", 0, 2000, 100 / 3600)
-        W.adddemand("O_N", "D_S", 0, 2000, 600 / 3600)
+            W.addLink("S_W", "intersection", "D_W", length=1000,
+                      free_flow_speed=20, backward_wave_speed=5, jam_density=0.2)
+        W.addLink("S_S", "intersection", "D_S", length=1000,
+                  free_flow_speed=20, backward_wave_speed=5, jam_density=0.2)
+        W.adddemand("O_S", "D_N", 0, 2000, 600/3600)
+        W.adddemand("O_E", "D_W", 0, 2000, 100/3600)
+        W.adddemand("O_N", "D_S", 0, 2000, 600/3600)
         return W
 
     def test_inm_uncongested(self):
@@ -1092,7 +922,7 @@ class TestINM:
 
     def test_inm_congested(self):
         """JAX INM matches Python for Floetteroed Table 2 (congested)."""
-        W = self._build_flotterod(sw_capacity=400 / 3600)
+        W = self._build_flotterod(sw_capacity=400/3600)
         W.exec_simulation()
         W.analyzer.basic_analysis()
 
@@ -1120,48 +950,32 @@ class TestINM:
 # DUO tests
 # ================================================================
 
-
 class TestDUO:
     """Verify JAX DUO matches Python DUO and supports gradients."""
 
     def _build_kuwahara(self):
         """Build Kuwahara & Akamatsu (2001) Fig.5 scenario."""
-        W = World(tmax=5 * 3600, print_mode=0, route_choice="duo")
-        W.addNode("1", -2, 0)
-        W.addNode("2", 0, -1)
-        W.addNode("3", 2, -1)
-        W.addNode("4", -1, 1)
-        W.addNode("5", 0.5, 1)
-        W.addNode("6", 1.5, 1)
+        W = World(tmax=5*3600, print_mode=0, route_choice="duo")
+        W.addNode("1", -2, 0); W.addNode("2", 0, -1); W.addNode("3", 2, -1)
+        W.addNode("4", -1, 1); W.addNode("5", 0.5, 1); W.addNode("6", 1.5, 1)
         link_data = [
-            ("1", "4", 2, 0.05, 0.1, 450, 6000),
-            ("4", "5", 16, 0.2, 0.8, 375, 6000),
-            ("5", "6", 8, 0.1, 0.4, 250, 4000),
-            ("6", "3", 2, 0.05, 0.1, 225, 3000),
-            ("1", "2", 16, 0.4, 0.8, 450, 6000),
-            ("2", "3", 12, 0.3, 0.6, 450, 6000),
-            ("5", "2", 2, 0.05, 0.1, 450, 6000),
-        ]
+            ("1","4",2,0.05,0.1,450,6000), ("4","5",16,0.2,0.8,375,6000),
+            ("5","6",8,0.1,0.4,250,4000), ("6","3",2,0.05,0.1,225,3000),
+            ("1","2",16,0.4,0.8,450,6000), ("2","3",12,0.3,0.6,450,6000),
+            ("5","2",2,0.05,0.1,450,6000)]
         for s, e, L, lw, lwp, km, fm in link_data:
-            W.addLink(
-                f"{s}_{e}",
-                s,
-                e,
-                length=L * 1000,
-                free_flow_speed=(L / lw) * 1000 / 3600,
-                backward_wave_speed=(L / lwp) * 1000 / 3600,
-                capacity=fm / 3600,
-            )
-        W.adddemand("1", "2", 0, 3600, 1000 / 3600)
-        W.adddemand("1", "2", 3600, 10800, 2000 / 3600)
-        W.adddemand("1", "3", 0, 3600, 2000 / 3600)
-        W.adddemand("1", "3", 3600, 10800, 4000 / 3600)
+            W.addLink(f"{s}_{e}", s, e, length=L*1000,
+                      free_flow_speed=(L/lw)*1000/3600, backward_wave_speed=(L/lwp)*1000/3600,
+                      capacity=fm/3600)
+        W.adddemand("1", "2", 0, 3600, 1000/3600)
+        W.adddemand("1", "2", 3600, 10800, 2000/3600)
+        W.adddemand("1", "3", 0, 3600, 2000/3600)
+        W.adddemand("1", "3", 3600, 10800, 4000/3600)
         return W
 
     def test_duo_jax_runs(self):
         """JAX DUO simulation runs without error."""
         from unsim.unsim_diff import world_to_jax, simulate_duo, total_travel_time
-
         W = self._build_kuwahara()
         W.exec_simulation()  # Python DUO
         params, config = world_to_jax(W)
@@ -1173,7 +987,6 @@ class TestDUO:
     def test_duo_jax_matches_python(self):
         """JAX DUO TTT matches Python DUO TTT."""
         from unsim.unsim_diff import world_to_jax, simulate_duo, total_travel_time
-
         W = self._build_kuwahara()
         W.exec_simulation()
         W.analyzer.basic_analysis()
@@ -1182,14 +995,12 @@ class TestDUO:
         params, config = world_to_jax(W)
         state = simulate_duo(params, config)
         ttt_jax = float(total_travel_time(state, config))
-        assert equal_tolerance(
-            ttt_jax, ttt_py, rel_tol=0.3
-        ), f"JAX TTT={ttt_jax:.0f} vs Python TTT={ttt_py:.0f}"
+        assert equal_tolerance(ttt_jax, ttt_py, rel_tol=0.3), \
+            f"JAX TTT={ttt_jax:.0f} vs Python TTT={ttt_py:.0f}"
 
     def test_duo_grad_od_demand(self):
         """Gradient of TTT w.r.t. OD demand is finite."""
         from unsim.unsim_diff import world_to_jax, simulate_duo, total_travel_time
-
         W = self._build_kuwahara()
         params, config = world_to_jax(W)
 
@@ -1205,20 +1016,16 @@ class TestDUO:
 # Virtual vehicle travel time tests
 # ================================================================
 
-
 class TestTravelTime:
     """Verify differentiable travel_time matches Analyzer.travel_time."""
 
     def test_1link_freeflow(self):
         """Single link, free flow: travel time = d/u."""
-
         def factory():
             W = World(name="", deltat=5, tmax=2000, print_mode=0)
             W.addNode("orig", 0, 0)
             W.addNode("dest", 1, 1)
-            W.addLink(
-                "link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-            )
+            W.addLink("link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
             W.adddemand("orig", "dest", 0, 500, 0.5)
             return W
 
@@ -1229,23 +1036,18 @@ class TestTravelTime:
         tt_jax = float(travel_time([link_id], t_dep, state, params, config))
         tt_py = W.analyzer.travel_time("orig", "dest", t_dep, path=["link"])
 
-        assert abs(tt_jax - 1000 / 20) < 1.0, f"Free flow: expected 50, got {tt_jax}"
+        assert abs(tt_jax - 1000/20) < 1.0, f"Free flow: expected 50, got {tt_jax}"
         assert abs(tt_jax - tt_py) < 1.0, f"Mismatch: jax={tt_jax}, py={tt_py}"
 
     def test_2link_freeflow(self):
         """Two links, free flow: travel time = d1/u1 + d2/u2."""
-
         def factory():
             W = World(name="", deltat=5, tmax=2000, print_mode=0)
             W.addNode("orig", 0, 0)
             W.addNode("mid", 1, 1)
             W.addNode("dest", 2, 2)
-            W.addLink(
-                "link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2
-            )
-            W.addLink(
-                "link2", "mid", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-            )
+            W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.addLink("link2", "mid", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
             W.adddemand("orig", "dest", 0, 500, 0.3)
             return W
 
@@ -1253,26 +1055,19 @@ class TestTravelTime:
         tt_jax = float(travel_time([0, 1], 100.0, state, params, config))
         tt_py = W.analyzer.travel_time("orig", "dest", 100.0, path=["link1", "link2"])
 
-        expected = 1000 / 20 + 1000 / 20  # 100s
-        assert (
-            abs(tt_jax - expected) < 2.0
-        ), f"Free flow 2-link: expected {expected}, got {tt_jax}"
+        expected = 1000/20 + 1000/20  # 100s
+        assert abs(tt_jax - expected) < 2.0, f"Free flow 2-link: expected {expected}, got {tt_jax}"
         assert abs(tt_jax - tt_py) < 2.0, f"Mismatch: jax={tt_jax}, py={tt_py}"
 
     def test_bottleneck_congestion(self):
         """Bottleneck causes travel time > free flow."""
-
         def factory():
             W = World(name="", deltat=5, tmax=2000, print_mode=0)
             W.addNode("orig", 0, 0)
             W.addNode("mid", 1, 1)
             W.addNode("dest", 2, 2)
-            W.addLink(
-                "link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2
-            )
-            W.addLink(
-                "link2", "mid", "dest", length=1000, free_flow_speed=10, jam_density=0.2
-            )
+            W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+            W.addLink("link2", "mid", "dest", length=1000, free_flow_speed=10, jam_density=0.2)
             W.adddemand("orig", "dest", 0, 1000, 0.8)
             return W
 
@@ -1282,13 +1077,10 @@ class TestTravelTime:
         tt_jax = float(travel_time([0, 1], 500.0, state, params, config))
         tt_py = W.analyzer.travel_time("orig", "dest", 500.0, path=["link1", "link2"])
 
-        free_flow_tt = 1000 / 20 + 1000 / 10  # 150s
-        assert (
-            tt_jax > free_flow_tt
-        ), f"Should exceed free flow: {tt_jax} <= {free_flow_tt}"
-        assert (
-            abs(tt_jax - tt_py) / max(tt_py, 1.0) < 0.05
-        ), f"Mismatch: jax={tt_jax:.1f}, py={tt_py:.1f}"
+        free_flow_tt = 1000/20 + 1000/10  # 150s
+        assert tt_jax > free_flow_tt, f"Should exceed free flow: {tt_jax} <= {free_flow_tt}"
+        assert abs(tt_jax - tt_py) / max(tt_py, 1.0) < 0.05, \
+            f"Mismatch: jax={tt_jax:.1f}, py={tt_py:.1f}"
 
     def test_grad_travel_time_demand(self):
         """AD gradient of travel_time w.r.t. demand matches Newell theory.
@@ -1306,12 +1098,8 @@ class TestTravelTime:
         W.addNode("orig", 0, 0)
         W.addNode("mid", 1, 1)
         W.addNode("dest", 2, 2)
-        W.addLink(
-            "link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2
-        )
-        W.addLink(
-            "link2", "mid", "dest", length=1000, free_flow_speed=10, jam_density=0.2
-        )
+        W.addLink("link1", "orig", "mid", length=1000, free_flow_speed=20, jam_density=0.2)
+        W.addLink("link2", "mid", "dest", length=1000, free_flow_speed=10, jam_density=0.2)
         W.adddemand("orig", "dest", 0, 1000, 0.8)
 
         params, config = world_to_jax(W)
@@ -1325,9 +1113,8 @@ class TestTravelTime:
 
         assert jnp.all(jnp.isfinite(grads.demand_rate))
         # Theory: gradient = 0 (demand = q1*, supply branch selected at origin)
-        assert jnp.allclose(
-            grads.demand_rate, 0.0, atol=1e-6
-        ), f"Expected 0, got sum={float(jnp.sum(grads.demand_rate))}"
+        assert jnp.allclose(grads.demand_rate, 0.0, atol=1e-6), \
+            f"Expected 0, got sum={float(jnp.sum(grads.demand_rate))}"
 
     def test_grad_invert_interp_1d(self):
         """Unit test: invert_interp_1d gradient matches theory.
@@ -1348,16 +1135,15 @@ class TestTravelTime:
 
         # Gradient w.r.t. value
         grad_val = float(jax.grad(lambda v: invert_interp_1d(arr, v))(val))
-        assert abs(grad_val - 0.4) < 0.01, f"d/d(value): AD={grad_val:.4f}, theory=0.4"
+        assert abs(grad_val - 0.4) < 0.01, \
+            f"d/d(value): AD={grad_val:.4f}, theory=0.4"
 
         # Gradient w.r.t. array
         grad_arr = jax.grad(lambda a: invert_interp_1d(a, val))(arr)
-        assert (
-            abs(float(grad_arr[1]) - (-0.2)) < 0.01
-        ), f"d/d(arr[1]): AD={float(grad_arr[1]):.4f}, theory=-0.2"
-        assert (
-            abs(float(grad_arr[2]) - (-0.2)) < 0.01
-        ), f"d/d(arr[2]): AD={float(grad_arr[2]):.4f}, theory=-0.2"
+        assert abs(float(grad_arr[1]) - (-0.2)) < 0.01, \
+            f"d/d(arr[1]): AD={float(grad_arr[1]):.4f}, theory=-0.2"
+        assert abs(float(grad_arr[2]) - (-0.2)) < 0.01, \
+            f"d/d(arr[2]): AD={float(grad_arr[2]):.4f}, theory=-0.2"
 
     def test_grad_link_exit_time_direct(self):
         """link_exit_time gradient with frozen state (no simulate gradient).
@@ -1372,9 +1158,7 @@ class TestTravelTime:
         W = World(name="", deltat=5, tmax=2000, print_mode=0)
         W.addNode("orig", 0, 0)
         W.addNode("dest", 1, 1)
-        W.addLink(
-            "link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-        )
+        W.addLink("link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
         W.adddemand("orig", "dest", 0, 500, 0.5)
 
         params, config = world_to_jax(W)
@@ -1389,8 +1173,9 @@ class TestTravelTime:
 
         grads = jax.grad(loss_direct)(params)
         ad_grad = float(grads.u[0])
-        expected = 0.5 * (-1000.0 / 20.0**2)  # -1.25
-        assert abs(ad_grad - expected) < 0.1, f"AD={ad_grad:.4f}, theory={expected:.4f}"
+        expected = 0.5 * (-1000.0 / 20.0 ** 2)  # -1.25
+        assert abs(ad_grad - expected) < 0.1, \
+            f"AD={ad_grad:.4f}, theory={expected:.4f}"
 
     def test_grad_travel_time_speed(self):
         """Full pipeline: simulate + travel_time, gradient w.r.t. speed.
@@ -1406,9 +1191,7 @@ class TestTravelTime:
         W = World(name="", deltat=5, tmax=2000, print_mode=0)
         W.addNode("orig", 0, 0)
         W.addNode("dest", 1, 1)
-        W.addLink(
-            "link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-        )
+        W.addLink("link", "orig", "dest", length=1000, free_flow_speed=20, jam_density=0.2)
         W.adddemand("orig", "dest", 0, 500, 0.5)
 
         params, config = world_to_jax(W)
@@ -1427,9 +1210,8 @@ class TestTravelTime:
         pm = params._replace(u=params.u.at[0].set(u0 - eps))
         fd_grad = (float(loss_full(pp)) - float(loss_full(pm))) / (2 * eps)
 
-        assert (
-            abs(ad_grad - fd_grad) / max(abs(fd_grad), 1.0) < 0.15
-        ), f"AD={ad_grad:.4f}, FD={fd_grad:.4f}"
+        assert abs(ad_grad - fd_grad) / max(abs(fd_grad), 1.0) < 0.15, \
+            f"AD={ad_grad:.4f}, FD={fd_grad:.4f}"
 
 
 # ================================================================
@@ -1449,37 +1231,20 @@ def _check_reg(actual, expected, label=""):
     else:
         ok = diff < _REG_ABS_TOL
     assert ok, (
-        f"{label}: actual={actual:.6f}, expected={expected:.6f}, " f"diff={diff:.6f}"
-    )
+        f"{label}: actual={actual:.6f}, expected={expected:.6f}, "
+        f"diff={diff:.6f}")
 
 
 def _build_merge_regression():
     W = World(name="", deltat=5, tmax=2000, print_mode=0)
-    W.addNode("orig1", 0, 0)
-    W.addNode("orig2", 0, 2)
-    W.addNode("merge", 1, 1)
-    W.addNode("dest", 2, 1)
-    W.addLink(
-        "link1",
-        "orig1",
-        "merge",
-        length=1000,
-        free_flow_speed=20,
-        jam_density=0.2,
-        merge_priority=1,
-    )
-    W.addLink(
-        "link2",
-        "orig2",
-        "merge",
-        length=1000,
-        free_flow_speed=20,
-        jam_density=0.2,
-        merge_priority=1,
-    )
-    W.addLink(
-        "link3", "merge", "dest", length=1000, free_flow_speed=20, jam_density=0.2
-    )
+    W.addNode("orig1", 0, 0); W.addNode("orig2", 0, 2)
+    W.addNode("merge", 1, 1); W.addNode("dest", 2, 1)
+    W.addLink("link1", "orig1", "merge", length=1000,
+              free_flow_speed=20, jam_density=0.2, merge_priority=1)
+    W.addLink("link2", "orig2", "merge", length=1000,
+              free_flow_speed=20, jam_density=0.2, merge_priority=1)
+    W.addLink("link3", "merge", "dest", length=1000,
+              free_flow_speed=20, jam_density=0.2)
     W.adddemand("orig1", "dest", 0, 1000, 0.45)
     W.adddemand("orig2", "dest", 400, 1000, 0.6)
     return W
@@ -1498,75 +1263,64 @@ class TestMergeAD:
 
     def test_ad_demand_orig1(self):
         p, c = self.params, self.config
-        grad = jax.grad(
-            lambda dr: total_travel_time(simulate(p._replace(demand_rate=dr), c), c)
-        )(p.demand_rate)
+        grad = jax.grad(lambda dr: total_travel_time(
+            simulate(p._replace(demand_rate=dr), c), c))(p.demand_rate)
         _check_reg(float(jnp.sum(grad[0])), 437453.62, "demand_orig1")
 
     def test_ad_demand_orig2(self):
         p, c = self.params, self.config
-        grad = jax.grad(
-            lambda dr: total_travel_time(simulate(p._replace(demand_rate=dr), c), c)
-        )(p.demand_rate)
+        grad = jax.grad(lambda dr: total_travel_time(
+            simulate(p._replace(demand_rate=dr), c), c))(p.demand_rate)
         _check_reg(float(jnp.sum(grad[1])), 421502.56, "demand_orig2")
 
     def test_ad_speed_link1(self):
         p, c = self.params, self.config
-        grad = jax.grad(lambda u: total_travel_time(simulate(p._replace(u=u), c), c))(
-            p.u
-        )
+        grad = jax.grad(lambda u: total_travel_time(
+            simulate(p._replace(u=u), c), c))(p.u)
         _check_reg(float(grad[0]), -1278.28, "speed_link1")
 
     def test_ad_speed_link2(self):
         p, c = self.params, self.config
-        grad = jax.grad(lambda u: total_travel_time(simulate(p._replace(u=u), c), c))(
-            p.u
-        )
+        grad = jax.grad(lambda u: total_travel_time(
+            simulate(p._replace(u=u), c), c))(p.u)
         _check_reg(float(grad[1]), -616.88, "speed_link2")
 
     def test_ad_speed_link3(self):
         p, c = self.params, self.config
-        grad = jax.grad(lambda u: total_travel_time(simulate(p._replace(u=u), c), c))(
-            p.u
-        )
+        grad = jax.grad(lambda u: total_travel_time(
+            simulate(p._replace(u=u), c), c))(p.u)
         _check_reg(float(grad[2]), -2024.69, "speed_link3")
 
     def test_ad_linkTTT_link1(self):
         p, c, mp1 = self.params, self.config, self.mp1_base
-
         def fn(m):
-            s = simulate(p._replace(merge_priority=p.merge_priority.at[0].set(m)), c)
-            n = s.cum_arrival[:, : c.tsize] - s.cum_departure[:, : c.tsize]
+            s = simulate(p._replace(
+                merge_priority=p.merge_priority.at[0].set(m)), c)
+            n = s.cum_arrival[:, :c.tsize] - s.cum_departure[:, :c.tsize]
             return jnp.sum(n, axis=1) * c.deltat
-
         _check_reg(float(jax.jacfwd(fn)(mp1)[0]), -45900.04, "linkTTT_link1")
 
     def test_ad_linkTTT_link2(self):
         p, c, mp1 = self.params, self.config, self.mp1_base
-
         def fn(m):
-            s = simulate(p._replace(merge_priority=p.merge_priority.at[0].set(m)), c)
-            n = s.cum_arrival[:, : c.tsize] - s.cum_departure[:, : c.tsize]
+            s = simulate(p._replace(
+                merge_priority=p.merge_priority.at[0].set(m)), c)
+            n = s.cum_arrival[:, :c.tsize] - s.cum_departure[:, :c.tsize]
             return jnp.sum(n, axis=1) * c.deltat
-
         _check_reg(float(jax.jacfwd(fn)(mp1)[1]), 40725.04, "linkTTT_link2")
 
     def test_ad_odTT_orig1_t100(self):
         p, c, mp1 = self.params, self.config, self.mp1_base
-
         def fn(m):
             pp = p._replace(merge_priority=p.merge_priority.at[0].set(m))
             return travel_time_auto(0, 3, 100.0, simulate(pp, c), pp, c)
-
         _check_reg(float(jax.grad(fn)(mp1)), 0.0, "odTT_orig1_t100")
 
     def test_ad_odTT_orig2_t500(self):
         p, c, mp1 = self.params, self.config, self.mp1_base
-
         def fn(m):
             pp = p._replace(merge_priority=p.merge_priority.at[0].set(m))
             return travel_time_auto(1, 3, 500.0, simulate(pp, c), pp, c)
-
         _check_reg(float(jax.grad(fn)(mp1)), 75.0, "odTT_orig2_t500")
 
 
@@ -1586,44 +1340,32 @@ class TestMergeFD:
 
     def test_fd_demand_orig1(self):
         p, c = self.params, self.config
-
         def fn(d):
-            return float(
-                total_travel_time(
-                    simulate(p._replace(demand_rate=p.demand_rate.at[0, :].add(d)), c),
-                    c,
-                )
-            )
-
+            return float(total_travel_time(
+                simulate(p._replace(demand_rate=p.demand_rate.at[0,:].add(d)), c), c))
         _check_reg(self._fd(fn), 448125.00, "fd_demand_orig1")
 
     def test_fd_speed_link1(self):
         p, c = self.params, self.config
-
         def fn(d):
-            return float(
-                total_travel_time(simulate(p._replace(u=p.u.at[0].add(d)), c), c)
-            )
-
+            return float(total_travel_time(
+                simulate(p._replace(u=p.u.at[0].add(d)), c), c))
         _check_reg(self._fd(fn), -1351.56, "fd_speed_link1")
 
     def test_fd_odTT_orig2_t500(self):
         p, c, mp1 = self.params, self.config, self.mp1_base
-
         def fn(d):
-            pp = p._replace(merge_priority=p.merge_priority.at[0].set(mp1 + d))
+            pp = p._replace(merge_priority=p.merge_priority.at[0].set(mp1+d))
             return float(travel_time_auto(1, 3, 500.0, simulate(pp, c), pp, c))
-
         _check_reg(self._fd(fn), 75.04, "fd_odTT_orig2_t500")
 
 
 def _build_duo_regression():
-    W = World(name="", deltat=5, tmax=4000, print_mode=0, route_choice="duo_logit")
+    W = World(name="", deltat=5, tmax=4000, print_mode=0,
+              route_choice="duo_logit")
     W.LOGIT_TEMPERATURE = 60.0
-    W.addNode("orig", 0, 0)
-    W.addNode("mid1", 1, 1)
-    W.addNode("mid2", 1, -1)
-    W.addNode("dest", 2, 0)
+    W.addNode("orig", 0, 0); W.addNode("mid1", 1, 1)
+    W.addNode("mid2", 1, -1); W.addNode("dest", 2, 0)
     W.addLink("fast1", "orig", "mid1", length=1000, free_flow_speed=20, capacity=0.8)
     W.addLink("fast2", "mid1", "dest", length=500, free_flow_speed=20, capacity=0.6)
     W.addLink("slow1", "orig", "mid2", length=1000, free_flow_speed=10, capacity=0.8)
@@ -1652,40 +1394,26 @@ class TestDuoAD:
 
     def _replace_cap(self, cap):
         return self.params._replace(
-            q_star=self.params.q_star.at[self.fast2_id].set(cap)
-        )
+            q_star=self.params.q_star.at[self.fast2_id].set(cap))
 
     def test_ad_ttt_all(self):
-        g = float(
-            jax.grad(
-                lambda c: total_travel_time(
-                    simulate_duo(self._replace_cap(c), self.config), self.config
-                )
-            )(self.cap0)
-        )
+        g = float(jax.grad(lambda c: total_travel_time(
+            simulate_duo(self._replace_cap(c), self.config),
+            self.config))(self.cap0))
         _check_reg(g, -586318.62, "ttt_all")
 
     def test_ad_odTT_t1500(self):
         def fn(c):
             p = self._replace_cap(c)
-            return travel_time_auto(
-                self.orig_id,
-                self.dest_id,
-                1500.0,
-                simulate_duo(p, self.config),
-                p,
-                self.config,
-            )
-
+            return travel_time_auto(self.orig_id, self.dest_id,
+                                    1500.0, simulate_duo(p, self.config), p, self.config)
         _check_reg(float(jax.grad(fn)(self.cap0)), -570.35, "odTT_t1500")
 
     def test_ad_pathTT_fast_t1500(self):
         def fn(c):
             p = self._replace_cap(c)
-            return travel_time(
-                self.fast_path, 1500.0, simulate_duo(p, self.config), p, self.config
-            )
-
+            return travel_time(self.fast_path, 1500.0,
+                               simulate_duo(p, self.config), p, self.config)
         _check_reg(float(jax.grad(fn)(self.cap0)), -570.35, "pathTT_fast_t1500")
 
 
@@ -1708,34 +1436,21 @@ class TestDuoFD:
 
     def _replace_cap(self, cap):
         return self.params._replace(
-            q_star=self.params.q_star.at[self.fast2_id].set(cap)
-        )
+            q_star=self.params.q_star.at[self.fast2_id].set(cap))
 
     def _fd(self, fn):
-        return (fn(self.cap0 + _FD_DELTA) - fn(self.cap0 - _FD_DELTA)) / (2 * _FD_DELTA)
+        return (fn(self.cap0+_FD_DELTA) - fn(self.cap0-_FD_DELTA)) / (2*_FD_DELTA)
 
     def test_fd_ttt_all(self):
         def fn(c):
-            return float(
-                total_travel_time(
-                    simulate_duo(self._replace_cap(c), self.config), self.config
-                )
-            )
-
+            return float(total_travel_time(
+                simulate_duo(self._replace_cap(c), self.config), self.config))
         _check_reg(self._fd(fn), -585710.94, "fd_ttt_all")
 
     def test_fd_odTT_t1500(self):
         def fn(c):
             p = self._replace_cap(c)
-            return float(
-                travel_time_auto(
-                    self.orig_id,
-                    self.dest_id,
-                    1500.0,
-                    simulate_duo(p, self.config),
-                    p,
-                    self.config,
-                )
-            )
-
+            return float(travel_time_auto(
+                self.orig_id, self.dest_id, 1500.0,
+                simulate_duo(p, self.config), p, self.config))
         _check_reg(self._fd(fn), -570.13, "fd_odTT_t1500")
