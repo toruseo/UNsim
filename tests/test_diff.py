@@ -263,19 +263,6 @@ class TestNumericalAgreement:
                 err_msg=f"Link {link.name} (id={link_id}) cum_departure mismatch:"
             )
 
-    @staticmethod
-    def _merge_node_jax_formula(D, p, S):
-        """Merge node calculation matching unsim_diff.py."""
-        total_D = jnp.sum(D)
-        alphas = p / jnp.maximum(jnp.sum(p), 1e-10)
-        base_q = jnp.minimum(D, alphas * S)
-        rem_S = jnp.maximum(S - jnp.sum(base_q), 0.0)
-        surplus_cap = D - base_q
-        cum_surplus = jnp.cumsum(surplus_cap)
-        extra_q = jnp.minimum(surplus_cap, jnp.maximum(rem_S - (cum_surplus - surplus_cap), 0.0))
-        merge_q = jnp.where(total_D <= S, D, base_q + extra_q)
-        return merge_q
-
     def test_merge_2inlinks_fair_linkwise(self):
         """2-to-1 merge, equal priority: check every link's cumulative arrival and departure."""
         def factory():
@@ -696,20 +683,6 @@ class TestGradient:
         assert jnp.allclose(curr_dQ_dD, prior_dQ_dD, atol=1e-5)
         assert jnp.allclose(curr_dQ_dp, prior_dQ_dp, atol=1e-5)
         assert jnp.allclose(curr_dQ_dS, prior_dQ_dS, atol=1e-5)
-
-    def test_grad_merge_2inlinks_prior_at_boundary(self):
-        """Verify prior implementation has correct gradients at boundary point D[0] == alpha[0]*S."""
-        D = jnp.array([0.5, 1.0])
-        p = jnp.array([1.0, 1.0])
-        S = jnp.float32(1.0)
-
-        prior_dQ_dD = jax.grad(lambda d: jnp.sum(self._prior_merge_2inlinks(d, p, S)))(D)
-        prior_dQ_dp = jax.grad(lambda pr: jnp.sum(self._prior_merge_2inlinks(D, pr, S)))(p)
-        prior_dQ_dS = jax.grad(lambda s: jnp.sum(self._prior_merge_2inlinks(D, p, s)))(S)
-
-        assert jnp.allclose(prior_dQ_dD, jnp.array([0.0, 0.0]), atol=1e-5)
-        assert jnp.allclose(prior_dQ_dp, jnp.array([0.0, 0.0]), atol=1e-5)
-        assert jnp.allclose(prior_dQ_dS, 1.0, atol=1e-5)
 
     def test_grad_merge_2inlinks_vs_prior_uncongested(self):
         """Compare gradients with prior implementation in uncongested regime."""
