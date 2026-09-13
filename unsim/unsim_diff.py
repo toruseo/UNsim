@@ -574,8 +574,12 @@ def compute_node_transfers(t_index, demands, supplies, state, params, config):
     surplus_cap = jnp.where(in_valid, in_dem - base_q, 0.0)
     cum_surplus = jnp.cumsum(surplus_cap, axis=1)
     extra_q = jnp.minimum(surplus_cap, jnp.maximum(rem_S[:, None] - (cum_surplus - surplus_cap), 0.0))
-    merge_q_all = jnp.where(total_D[:, None] <= S_merge[:, None], in_dem, base_q + extra_q)  # (n_nodes, max_in)
-    merge_q_out = jnp.sum(jnp.where(in_valid, merge_q_all, 0.0), axis=1)  # (n_nodes,)
+    q_cong = base_q + extra_q
+    sum_q_cong = jnp.sum(jnp.where(in_valid, q_cong, 0.0), axis=1, keepdims=True)
+    scale_cong = S_merge[:, None] / jnp.where(sum_q_cong > 0.0, sum_q_cong, 1.0)
+    q_cong = jnp.where(in_valid, q_cong * scale_cong, 0.0)
+    merge_q_all = jnp.where(total_D[:, None] <= S_merge[:, None], in_dem, q_cong)  # (n_nodes, max_in)
+    merge_q_out = jnp.minimum(total_D, S_merge)  # (n_nodes,)
 
     # ---- Diverge (type=4) ----
     D_div = in_dem[:, 0]  # (n_nodes,)
