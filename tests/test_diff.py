@@ -56,6 +56,7 @@ def run_both(world_factory):
     return W, params, config, state
 
 
+
 # ================================================================
 # Numerical agreement tests
 # ================================================================
@@ -471,27 +472,85 @@ class TestNumericalAgreement:
         W, params, config, state = run_both(factory)
         self._check_linkwise(W, state, config)
 
+    @staticmethod
+    def _simulate_minimal_merge(factory, D, p, S, return_linkwise=False):
+        """Run minimal merge World through simulate and return merge node flow(s)."""
+        W = factory()
+        params, config = world_to_jax(W)
+        n_in = len(D)
+        outlink_id = n_in
+        params = params._replace(
+            demand_rate=params.demand_rate.at[:n_in, :].set(D[:, None]),
+            merge_priority=params.merge_priority.at[:n_in].set(p),
+            q_star=params.q_star.at[outlink_id].set(S),
+        )
+        state = simulate(params, config)
+        if return_linkwise:
+            return jnp.array(
+                [state.cum_departure[i][2] - state.cum_departure[i][1] for i in range(n_in)]
+            )
+        else:
+            return state.cum_arrival[outlink_id][2] - state.cum_arrival[outlink_id][1]
+
     @pytest.mark.parametrize("scale", [1e-12, 1e-6, 1e-3, 0.1, 0.5, 2.0, 10.0, 1e3, 1e6])
     def test_priority_scale_invariance_formula(self, scale):
-        """Direct formula check: flows must be invariant when scaling p by any positive factor."""
+        """Minimal merge simulation check: flows must be invariant when scaling p by any positive factor."""
+        def factory():
+            W = World(name="", deltat=1, tmax=3, print_mode=0)
+            for i in range(3):
+                W.addNode(f"orig{i}", 0, i)
+            W.addNode("merge", 1, 1)
+            W.addNode("dest", 2, 1)
+            for i in range(3):
+                W.addLink(
+                    f"in{i}", f"orig{i}", "merge", length=1, free_flow_speed=1,
+                    jam_density=10.0, capacity=10.0
+                )
+            W.addLink(
+                "out", "merge", "dest", length=1, free_flow_speed=1,
+                jam_density=10.0, capacity=1.0
+            )
+            for i in range(3):
+                W.adddemand(f"orig{i}", "dest", 0, 3, 1.0)
+            return W
+
         D = jnp.array([0.6, 0.8, 0.7])
         p_base = jnp.array([1.0, 2.0, 3.0])
         S = jnp.float32(1.0)
 
         p_scaled = p_base * scale
 
-        flow_base = jnp.array(self._merge_node_jax_formula(D, p_base, S))
-        flow_scaled = jnp.array(self._merge_node_jax_formula(D, p_scaled, S))
+        flow_base = self._simulate_minimal_merge(factory, D, p_base, S, return_linkwise=True)
+        flow_scaled = self._simulate_minimal_merge(factory, D, p_scaled, S, return_linkwise=True)
 
         self._assert_all_equal_tolerance(flow_scaled, flow_base, rel_tol=1e-4, abs_tol=1e-5)
 
     def test_tiny_priority_allocation(self):
         """Review comment P2: tiny priority must preserve true allocation ratio 1:2:1 -> [0.25, 0.5, 0.25]."""
+        def factory():
+            W = World(name="", deltat=1, tmax=3, print_mode=0)
+            for i in range(3):
+                W.addNode(f"orig{i}", 0, i)
+            W.addNode("merge", 1, 1)
+            W.addNode("dest", 2, 1)
+            for i in range(3):
+                W.addLink(
+                    f"in{i}", f"orig{i}", "merge", length=1, free_flow_speed=1,
+                    jam_density=10.0, capacity=10.0
+                )
+            W.addLink(
+                "out", "merge", "dest", length=1, free_flow_speed=1,
+                jam_density=10.0, capacity=1.0
+            )
+            for i in range(3):
+                W.adddemand(f"orig{i}", "dest", 0, 3, 1.0)
+            return W
+
         D = jnp.array([1.0, 1.0, 1.0])
         p_tiny = jnp.array([1e-12, 2e-12, 1e-12])
         S = jnp.float32(1.0)
 
-        flows = jnp.array(self._merge_node_jax_formula(D, p_tiny, S))
+        flows = self._simulate_minimal_merge(factory, D, p_tiny, S, return_linkwise=True)
         expected = jnp.array([0.25, 0.50, 0.25])
         assert jnp.allclose(flows, expected, atol=1e-4), f"Expected {expected}, got {flows}"
 
@@ -686,17 +745,24 @@ class TestGradient:
         return jnp.array([q1, q2])
 
     @staticmethod
-    def _merge_node_jax_formula(D, p, S):
-        """Merge node calculation matching unsim_diff.py."""
-        total_D = jnp.sum(D)
-        alphas = p / jnp.sum(p)
-        base_q = jnp.minimum(D, alphas * S)
-        rem_S = jnp.maximum(S - jnp.sum(base_q), 0.0)
-        surplus_cap = D - base_q
-        cum_surplus = jnp.cumsum(surplus_cap)
-        extra_q = jnp.minimum(surplus_cap, jnp.maximum(rem_S - (cum_surplus - surplus_cap), 0.0))
-        merge_q = jnp.where(total_D <= S, D, base_q + extra_q)
-        return merge_q
+    def _simulate_minimal_merge(factory, D, p, S, return_linkwise=False):
+        """Run minimal merge World through simulate and return merge node flow(s)."""
+        W = factory()
+        params, config = world_to_jax(W)
+        n_in = len(D)
+        outlink_id = n_in
+        params = params._replace(
+            demand_rate=params.demand_rate.at[:n_in, :].set(D[:, None]),
+            merge_priority=params.merge_priority.at[:n_in].set(p),
+            q_star=params.q_star.at[outlink_id].set(S),
+        )
+        state = simulate(params, config)
+        if return_linkwise:
+            return jnp.array(
+                [state.cum_departure[i][2] - state.cum_departure[i][1] for i in range(n_in)]
+            )
+        else:
+            return state.cum_arrival[outlink_id][2] - state.cum_arrival[outlink_id][1]
 
     def test_grad_merge_2inlinks_vs_prior_smooth(self):
         """Compare gradients with prior implementation at a smooth congested point.
@@ -705,6 +771,25 @@ class TestGradient:
         Both inlinks are bottlenecked, alphas = [1/3, 2/3].
         Check dQ/dD, dQ/dp, dQ/dS.
         """
+        def factory():
+            W = World(name="", deltat=1, tmax=3, print_mode=0)
+            for i in range(2):
+                W.addNode(f"orig{i}", 0, i)
+            W.addNode("merge", 1, 1)
+            W.addNode("dest", 2, 1)
+            for i in range(2):
+                W.addLink(
+                    f"in{i}", f"orig{i}", "merge", length=1, free_flow_speed=1,
+                    jam_density=10.0, capacity=10.0
+                )
+            W.addLink(
+                "out", "merge", "dest", length=1, free_flow_speed=1,
+                jam_density=10.0, capacity=1.0
+            )
+            for i in range(2):
+                W.adddemand(f"orig{i}", "dest", 0, 3, 1.0)
+            return W
+
         D = jnp.array([0.8, 0.8])
         p = jnp.array([1.0, 2.0])
         S = jnp.float32(1.0)
@@ -713,9 +798,9 @@ class TestGradient:
         prior_dQ_dp = jax.grad(lambda pr: jnp.sum(self._prior_merge_2inlinks(D, pr, S)))(p)
         prior_dQ_dS = jax.grad(lambda s: jnp.sum(self._prior_merge_2inlinks(D, p, s)))(S)
 
-        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
-        curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
-        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+        curr_dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(factory, d, p, S))(D)
+        curr_dQ_dp = jax.grad(lambda pr: self._simulate_minimal_merge(factory, D, pr, S))(p)
+        curr_dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(factory, D, p, s))(S)
 
         assert jnp.allclose(prior_dQ_dD, 0.0, atol=1e-5)
         assert jnp.allclose(prior_dQ_dp, 0.0, atol=1e-5)
@@ -741,6 +826,25 @@ class TestGradient:
 
     def test_grad_merge_2inlinks_vs_prior_uncongested(self):
         """Compare gradients with prior implementation in uncongested regime."""
+        def factory():
+            W = World(name="", deltat=1, tmax=3, print_mode=0)
+            for i in range(2):
+                W.addNode(f"orig{i}", 0, i)
+            W.addNode("merge", 1, 1)
+            W.addNode("dest", 2, 1)
+            for i in range(2):
+                W.addLink(
+                    f"in{i}", f"orig{i}", "merge", length=1, free_flow_speed=1,
+                    jam_density=10.0, capacity=10.0
+                )
+            W.addLink(
+                "out", "merge", "dest", length=1, free_flow_speed=1,
+                jam_density=10.0, capacity=1.0
+            )
+            for i in range(2):
+                W.adddemand(f"orig{i}", "dest", 0, 3, 1.0)
+            return W
+
         D = jnp.array([0.3, 0.4])
         p = jnp.array([1.0, 1.0])
         S = jnp.float32(1.0)
@@ -749,9 +853,9 @@ class TestGradient:
         prior_dQ_dp = jax.grad(lambda pr: jnp.sum(self._prior_merge_2inlinks(D, pr, S)))(p)
         prior_dQ_dS = jax.grad(lambda s: jnp.sum(self._prior_merge_2inlinks(D, p, s)))(S)
 
-        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
-        curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
-        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+        curr_dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(factory, d, p, S))(D)
+        curr_dQ_dp = jax.grad(lambda pr: self._simulate_minimal_merge(factory, D, pr, S))(p)
+        curr_dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(factory, D, p, s))(S)
 
         assert jnp.allclose(prior_dQ_dD, jnp.array([1.0, 1.0]), atol=1e-5)
         assert jnp.allclose(prior_dQ_dp, jnp.array([0.0, 0.0]), atol=1e-5)
@@ -763,6 +867,25 @@ class TestGradient:
 
     def test_grad_merge_2inlinks_vs_prior_one_under_capacity(self):
         """Compare gradients when one link is under priority share, taking residual supply."""
+        def factory():
+            W = World(name="", deltat=1, tmax=3, print_mode=0)
+            for i in range(2):
+                W.addNode(f"orig{i}", 0, i)
+            W.addNode("merge", 1, 1)
+            W.addNode("dest", 2, 1)
+            for i in range(2):
+                W.addLink(
+                    f"in{i}", f"orig{i}", "merge", length=1, free_flow_speed=1,
+                    jam_density=10.0, capacity=10.0
+                )
+            W.addLink(
+                "out", "merge", "dest", length=1, free_flow_speed=1,
+                jam_density=10.0, capacity=1.0
+            )
+            for i in range(2):
+                W.adddemand(f"orig{i}", "dest", 0, 3, 1.0)
+            return W
+
         D = jnp.array([0.2, 0.9])
         p = jnp.array([1.0, 1.0])
         S = jnp.float32(1.0)
@@ -771,9 +894,9 @@ class TestGradient:
         prior_dQ_dp = jax.grad(lambda pr: jnp.sum(self._prior_merge_2inlinks(D, pr, S)))(p)
         prior_dQ_dS = jax.grad(lambda s: jnp.sum(self._prior_merge_2inlinks(D, p, s)))(S)
 
-        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
-        curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
-        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+        curr_dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(factory, d, p, S))(D)
+        curr_dQ_dp = jax.grad(lambda pr: self._simulate_minimal_merge(factory, D, pr, S))(p)
+        curr_dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(factory, D, p, s))(S)
 
         assert jnp.allclose(prior_dQ_dD, jnp.array([0.0, 0.0]), atol=1e-5)
         assert jnp.allclose(prior_dQ_dp, jnp.array([0.0, 0.0]), atol=1e-5)
@@ -787,13 +910,32 @@ class TestGradient:
         """Under supply constraint at boundary D[0] == alpha[0]*S, true sensitivities must be:
         dQ/dD = [0, 0], dQ/dp = [0, 0], dQ/dS = 1.0.
         """
+        def factory():
+            W = World(name="", deltat=1, tmax=3, print_mode=0)
+            for i in range(2):
+                W.addNode(f"orig{i}", 0, i)
+            W.addNode("merge", 1, 1)
+            W.addNode("dest", 2, 1)
+            for i in range(2):
+                W.addLink(
+                    f"in{i}", f"orig{i}", "merge", length=1, free_flow_speed=1,
+                    jam_density=10.0, capacity=10.0
+                )
+            W.addLink(
+                "out", "merge", "dest", length=1, free_flow_speed=1,
+                jam_density=10.0, capacity=1.0
+            )
+            for i in range(2):
+                W.adddemand(f"orig{i}", "dest", 0, 3, 1.0)
+            return W
+
         D = jnp.array([0.5, 1.0])
         p = jnp.array([1.0, 1.0])
         S = jnp.float32(1.0)
 
-        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
-        curr_dQ_dp = jax.grad(lambda pr: jnp.sum(self._merge_node_jax_formula(D, pr, S)))(p)
-        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+        curr_dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(factory, d, p, S))(D)
+        curr_dQ_dp = jax.grad(lambda pr: self._simulate_minimal_merge(factory, D, pr, S))(p)
+        curr_dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(factory, D, p, s))(S)
 
         assert jnp.allclose(curr_dQ_dD, jnp.array([0.0, 0.0]), atol=1e-4), f"Expected dQ/dD=[0, 0], got {curr_dQ_dD}"
         assert jnp.allclose(curr_dQ_dp, jnp.array([0.0, 0.0]), atol=1e-4), f"Expected dQ/dp=[0, 0], got {curr_dQ_dp}"
@@ -805,12 +947,31 @@ class TestGradient:
         Here alpha = [0.25, 0.25, 0.50], so D[0] == alpha[0] * S = 0.25.
         Under supply constraint, true sensitivities must be: dQ/dD[0] = 0.0, dQ/dS = 1.0.
         """
+        def factory():
+            W = World(name="", deltat=1, tmax=3, print_mode=0)
+            for i in range(3):
+                W.addNode(f"orig{i}", 0, i)
+            W.addNode("merge", 1, 1)
+            W.addNode("dest", 2, 1)
+            for i in range(3):
+                W.addLink(
+                    f"in{i}", f"orig{i}", "merge", length=1, free_flow_speed=1,
+                    jam_density=10.0, capacity=10.0
+                )
+            W.addLink(
+                "out", "merge", "dest", length=1, free_flow_speed=1,
+                jam_density=10.0, capacity=1.0
+            )
+            for i in range(3):
+                W.adddemand(f"orig{i}", "dest", 0, 3, 1.0)
+            return W
+
         D = jnp.array([0.25, 0.75, 0.75])
         p = jnp.array([1.0, 1.0, 2.0])
         S = jnp.float32(1.0)
 
-        curr_dQ_dD = jax.grad(lambda d: jnp.sum(self._merge_node_jax_formula(d, p, S)))(D)
-        curr_dQ_dS = jax.grad(lambda s: jnp.sum(self._merge_node_jax_formula(D, p, s)))(S)
+        curr_dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(factory, d, p, S))(D)
+        curr_dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(factory, D, p, s))(S)
 
         assert jnp.isclose(float(curr_dQ_dD[0]), 0.0, atol=1e-4), f"Expected dQ/dD[0]=0, got {curr_dQ_dD[0]}"
         assert jnp.isclose(float(curr_dQ_dS), 1.0, atol=1e-4), f"Expected dQ/dS=1.0, got {curr_dQ_dS}"
