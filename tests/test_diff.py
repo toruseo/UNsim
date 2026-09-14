@@ -801,40 +801,313 @@ class TestGradient:
         assert jnp.allclose(curr_dQ_dp, jnp.array([0.0, 0.0]), atol=1e-4), f"Expected dQ/dp=[0, 0], got {curr_dQ_dp}"
         assert jnp.isclose(float(curr_dQ_dS), 1.0, atol=1e-4), f"Expected dQ/dS=1.0, got {curr_dQ_dS}"
 
-    def test_grad_merge_3inlinks_boundary(self):
-        """3-inlink boundary test: D = [0.25, 0.75, 0.75], p = [1.0, 1.0, 2.0], S = 1.0.
+    @staticmethod
+    def _factory_3in():
+        """Factory for minimal 3-to-1 merge world."""
+        W = World(name="", deltat=1, tmax=3, print_mode=0)
+        for i in range(3):
+            W.addNode(f"orig{i}", 0, i)
+        W.addNode("merge", 1, 1)
+        W.addNode("dest", 2, 1)
+        for i in range(3):
+            W.addLink(f"in{i}", f"orig{i}", "merge", length=1, free_flow_speed=1,
+                      jam_density=10.0, capacity=10.0)
+        W.addLink("out", "merge", "dest", length=1, free_flow_speed=1,
+                  jam_density=10.0, capacity=1.0)
+        for i in range(3):
+            W.adddemand(f"orig{i}", "dest", 0, 3, 1.0)
+        return W
 
-        Here alpha = [0.25, 0.25, 0.50], so D[0] == alpha[0] * S = 0.25.
-        Under supply constraint, true sensitivities must be: dQ/dD[0] = 0.0, dQ/dS = 1.0.
+    def test_grad_merge_3inlinks_freeflow_uncongested(self):
+        """Free-flow regime (total_D < S_merge): demand fully discharges freely.
+
+        Setting: D = [0.2, 0.3, 0.4] (sum=0.9), S = 1.2, p = [1, 1, 1].
+        Sensitivities: dQ/dD = [1, 1, 1], dQ/dS = 0, dQ/dp = [0, 0, 0].
+        Adjoint consistency between upstream outflow and downstream inflow must hold.
         """
-        def factory():
-            W = World(name="", deltat=1, tmax=3, print_mode=0)
-            for i in range(3):
-                W.addNode(f"orig{i}", 0, i)
-            W.addNode("merge", 1, 1)
-            W.addNode("dest", 2, 1)
-            for i in range(3):
-                W.addLink(
-                    f"in{i}", f"orig{i}", "merge", length=1, free_flow_speed=1,
-                    jam_density=10.0, capacity=10.0
-                )
-            W.addLink(
-                "out", "merge", "dest", length=1, free_flow_speed=1,
-                jam_density=10.0, capacity=1.0
-            )
-            for i in range(3):
-                W.adddemand(f"orig{i}", "dest", 0, 3, 1.0)
-            return W
+        D = jnp.array([0.2, 0.3, 0.4])
+        p = jnp.array([1.0, 1.0, 1.0])
+        S = jnp.float32(1.2)
 
+        q_in = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=True)
+        Q = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=False)
+        assert jnp.allclose(q_in, D, atol=1e-5)
+        assert jnp.isclose(Q, 0.9, atol=1e-5)
+
+        dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=False))(D)
+        dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=False))(S)
+        dQ_dp = jax.grad(lambda pr: self._simulate_minimal_merge(self._factory_3in, D, pr, S, return_linkwise=False))(p)
+
+        dQin_dD = jax.grad(lambda d: jnp.sum(self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True)))(D)
+        dQin_dS = jax.grad(lambda s: jnp.sum(self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True)))(S)
+
+        assert jnp.allclose(dQ_dD, jnp.array([1.0, 1.0, 1.0]), atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), 0.0, atol=1e-4)
+        assert jnp.allclose(dQ_dp, jnp.array([0.0, 0.0, 0.0]), atol=1e-4)
+
+        assert jnp.allclose(dQ_dD, dQin_dD, atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), float(dQin_dS), atol=1e-4)
+
+    def test_grad_merge_3inlinks_congested_all_oversaturated(self):
+        """Congested regime where all inlinks exceed priority capacity (forall i, D_i > alpha_i * S).
+
+        Setting: D = [0.6, 0.6, 0.6], S = 1.0, p = [1, 2, 1] (alpha = [0.25, 0.50, 0.25]).
+        No surplus supply exists. Each link discharges exactly alpha_i * S.
+        Sensitivities: dQ/dD = [0, 0, 0], dQ/dS = 1.0, dQ/dp = [0, 0, 0].
+        Individual link sensitivity: dq_in_i / dS = alpha_i.
+        """
+        D = jnp.array([0.6, 0.6, 0.6])
+        p = jnp.array([1.0, 2.0, 1.0])
+        S = jnp.float32(1.0)
+        expected_alpha = jnp.array([0.25, 0.50, 0.25])
+
+        q_in = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=True)
+        Q = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=False)
+        assert jnp.allclose(q_in, expected_alpha * S, atol=1e-5)
+        assert jnp.isclose(Q, 1.0, atol=1e-5)
+
+        dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=False))(D)
+        dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=False))(S)
+        dQ_dp = jax.grad(lambda pr: self._simulate_minimal_merge(self._factory_3in, D, pr, S, return_linkwise=False))(p)
+
+        dQin_dD = jax.grad(lambda d: jnp.sum(self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True)))(D)
+        dQin_dS = jax.grad(lambda s: jnp.sum(self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True)))(S)
+
+        assert jnp.allclose(dQ_dD, jnp.array([0.0, 0.0, 0.0]), atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), 1.0, atol=1e-4)
+        assert jnp.allclose(dQ_dp, jnp.array([0.0, 0.0, 0.0]), atol=1e-4)
+
+        assert jnp.allclose(dQ_dD, dQin_dD, atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), float(dQin_dS), atol=1e-4)
+
+        dqi_dS = jax.jacobian(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True))(S)
+        assert jnp.allclose(dqi_dS, expected_alpha, atol=1e-4)
+
+    def test_grad_merge_3inlinks_congested_partial_surplus_reallocated(self):
+        """Congested regime with partial surplus reallocation (exists i, D_i < alpha_i * S).
+
+        Setting: D = [0.1, 0.8, 0.8], S = 1.0, p = [1, 1, 1] (alpha = [1/3, 1/3, 1/3]).
+        Link 0 has D_0 = 0.1 < alpha_0 * S = 1/3; surplus 7/30 is reallocated to link 1.
+        Flows: [0.1, 17/30, 10/30], Q = 1.0.
+        Sensitivities: dQ/dD = [0, 0, 0], dQ/dS = 1.0, dQ/dp = [0, 0, 0].
+        """
+        D = jnp.array([0.1, 0.8, 0.8])
+        p = jnp.array([1.0, 1.0, 1.0])
+        S = jnp.float32(1.0)
+
+        q_in = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=True)
+        Q = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=False)
+        expected_q = jnp.array([0.1, 17.0 / 30.0, 10.0 / 30.0])
+        assert jnp.allclose(q_in, expected_q, atol=1e-5)
+        assert jnp.isclose(Q, 1.0, atol=1e-5)
+
+        dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=False))(D)
+        dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=False))(S)
+        dQ_dp = jax.grad(lambda pr: self._simulate_minimal_merge(self._factory_3in, D, pr, S, return_linkwise=False))(p)
+
+        dQin_dD = jax.grad(lambda d: jnp.sum(self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True)))(D)
+        dQin_dS = jax.grad(lambda s: jnp.sum(self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True)))(S)
+
+        assert jnp.allclose(dQ_dD, jnp.array([0.0, 0.0, 0.0]), atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), 1.0, atol=1e-4)
+        assert jnp.allclose(dQ_dp, jnp.array([0.0, 0.0, 0.0]), atol=1e-4)
+
+        assert jnp.allclose(dQ_dD, dQin_dD, atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), float(dQin_dS), atol=1e-4)
+
+    def test_grad_merge_3inlinks_boundary_demand_equals_supply(self):
+        """Critical boundary condition where total demand equals downstream supply (total_D == S_merge).
+
+        Setting: D = [0.3, 0.3, 0.4] (sum=1.0), S = 1.0, p = [1, 1, 1].
+        Tests upstream vs downstream adjoint consistency at the phase-transition boundary.
+        Fails on unpatched code because downstream uses minimum while upstream uses where(<=).
+        """
+        D = jnp.array([0.3, 0.3, 0.4])
+        p = jnp.array([1.0, 1.0, 1.0])
+        S = jnp.float32(1.0)
+
+        dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=False))(D)
+        dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=False))(S)
+
+        dQin_dD = jax.grad(lambda d: jnp.sum(self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True)))(D)
+        dQin_dS = jax.grad(lambda s: jnp.sum(self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True)))(S)
+
+        # Adjoint consistency check: downstream and upstream sum gradients must match exactly
+        assert jnp.allclose(dQ_dD, dQin_dD, atol=1e-4), \
+            f"Boundary mismatch dQ/dD: down={dQ_dD}, up_sum={dQin_dD}"
+        assert jnp.isclose(float(dQ_dS), float(dQin_dS), atol=1e-4), \
+            f"Boundary mismatch dQ/dS: down={dQ_dS}, up_sum={dQin_dS}"
+
+    def test_grad_merge_3inlinks_zero_supply_complete_blockage(self):
+        """Complete blockage with zero supply (S_merge == 0, total_D > 0).
+
+        Setting: D = [0.5, 0.5, 0.5], S = 0.0, p = [1, 2, 1] (alpha = [0.25, 0.50, 0.25]).
+        Flow is 0, but sensitivities w.r.t. supply S must NOT vanish:
+        dq_in_i / dS = alpha_i > 0, dQin/dS = 1.0, dQ/dS = 1.0.
+        Fails on unpatched code due to 0/0 NaN in scale_cong = S / sum_q.
+        """
+        D = jnp.array([0.5, 0.5, 0.5])
+        p = jnp.array([1.0, 2.0, 1.0])
+        S = jnp.float32(0.0)
+        expected_alpha = jnp.array([0.25, 0.50, 0.25])
+
+        q_in = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=True)
+        Q = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=False)
+        assert jnp.allclose(q_in, 0.0, atol=1e-5)
+        assert jnp.isclose(Q, 0.0, atol=1e-5)
+
+        # Upstream link-wise sensitivities must be non-zero and equal to alpha
+        dqi_dS = jax.jacobian(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True))(S)
+        assert jnp.allclose(dqi_dS, expected_alpha, atol=1e-4), \
+            f"Zero supply vanished/NaN upstream gradient! Expected {expected_alpha}, got {dqi_dS}"
+
+        dQin_dS = jax.grad(lambda s: jnp.sum(self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True)))(S)
+        dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=False))(S)
+
+        assert jnp.isclose(float(dQin_dS), 1.0, atol=1e-4), \
+            f"Zero supply upstream total dQin/dS vanished: got {dQin_dS}"
+        assert jnp.isclose(float(dQ_dS), 1.0, atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), float(dQin_dS), atol=1e-4)
+
+    def test_grad_merge_3inlinks_zero_demand_and_zero_supply(self):
+        """Zero traffic state (total_D == 0, S == 0).
+
+        Setting: D = [0, 0, 0], S = 0, p = [1, 1, 1].
+        Must evaluate cleanly to 0 without NaNs or Infs, with all gradients finite.
+        Fails on unpatched code because scale_cong produces NaN.
+        """
+        D = jnp.array([0.0, 0.0, 0.0])
+        p = jnp.array([1.0, 1.0, 1.0])
+        S = jnp.float32(0.0)
+
+        q_in = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=True)
+        Q = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=False)
+        assert jnp.allclose(q_in, 0.0, atol=1e-5)
+        assert jnp.isclose(Q, 0.0, atol=1e-5)
+
+        dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=False))(D)
+        dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=False))(S)
+        dQin_dD = jax.grad(lambda d: jnp.sum(self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True)))(D)
+        dQin_dS = jax.grad(lambda s: jnp.sum(self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True)))(S)
+
+        assert jnp.all(jnp.isfinite(dQ_dD))
+        assert jnp.isfinite(dQ_dS)
+        assert jnp.all(jnp.isfinite(dQin_dD))
+        assert jnp.isfinite(dQin_dS)
+
+    def test_grad_merge_3inlinks_base_allocation_tie_point(self):
+        """Base allocation tie-point under congestion (D_0 == alpha_0 * S).
+
+        Setting: D = [0.25, 0.75, 0.75], S = 1.0, p = [1, 1, 2] (alpha = [0.25, 0.25, 0.50]).
+        Link 0 demand reaches capacity exactly (D_0 == 0.25 == alpha_0 * S).
+        Under congestion, dq_in_0 / dD_0 must be 0.0.
+        Fails on unpatched code because JAX subgradient distortion gives 0.609375.
+        """
         D = jnp.array([0.25, 0.75, 0.75])
         p = jnp.array([1.0, 1.0, 2.0])
         S = jnp.float32(1.0)
 
-        curr_dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(factory, d, p, S))(D)
-        curr_dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(factory, D, p, s))(S)
+        dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=False))(D)
+        dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=False))(S)
 
-        assert jnp.isclose(float(curr_dQ_dD[0]), 0.0, atol=1e-4), f"Expected dQ/dD[0]=0, got {curr_dQ_dD[0]}"
-        assert jnp.isclose(float(curr_dQ_dS), 1.0, atol=1e-4), f"Expected dQ/dS=1.0, got {curr_dQ_dS}"
+        dQin_dD = jax.grad(lambda d: jnp.sum(self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True)))(D)
+        dQin_dS = jax.grad(lambda s: jnp.sum(self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True)))(S)
+
+        assert jnp.allclose(dQ_dD, jnp.array([0.0, 0.0, 0.0]), atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), 1.0, atol=1e-4)
+        assert jnp.allclose(dQin_dD, jnp.array([0.0, 0.0, 0.0]), atol=1e-4)
+        assert jnp.isclose(float(dQin_dS), 1.0, atol=1e-4)
+        assert jnp.allclose(dQ_dD, dQin_dD, atol=1e-4)
+
+        # Individual link sensitivity check: link 0 is capped at alpha_0 * S = 0.25.
+        # Under total_D > S congestion, increasing D_0 cannot increase link 0 discharge.
+        # Therefore, dq_in[0] / dD[0] must be 0.0 (unpatched code produces 0.609375 due to tie-point distortion).
+        dqi_dD = jax.jacobian(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True))(D)
+        assert jnp.isclose(float(dqi_dD[0, 0]), 0.0, atol=1e-4), \
+            f"Base allocation tie-point link 0 sensitivity distorted! Expected 0.0, got {dqi_dD[0, 0]}"
+
+    def test_grad_merge_3inlinks_surplus_exhaustion_boundary(self):
+        """Surplus exhaustion boundary where residual supply exactly depletes at a link.
+
+        Setting: D = [0.1, 0.7, 0.8], S = 1.2, p = [1, 1, 1] (alpha_i * S = 0.4).
+        Link 0 surplus = 0.3. Link 1 capacity cap_1 = 0.7 - 0.4 = 0.3 == rem_S.
+        Link 1 consumes all remaining surplus; any further increase in D_1 cannot increase flow.
+        Thus dq_in_1 / dD_1 must be 0.0.
+        Fails on unpatched code because JAX subgradient distortion gives 0.5.
+        """
+        D = jnp.array([0.1, 0.7, 0.8])
+        p = jnp.array([1.0, 1.0, 1.0])
+        S = jnp.float32(1.2)
+
+        q_in = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=True)
+        Q = self._simulate_minimal_merge(self._factory_3in, D, p, S, return_linkwise=False)
+        assert jnp.allclose(q_in, jnp.array([0.1, 0.7, 0.4]), atol=1e-5)
+        assert jnp.isclose(Q, 1.2, atol=1e-5)
+
+        dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=False))(D)
+        dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=False))(S)
+
+        dQin_dD = jax.grad(lambda d: jnp.sum(self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True)))(D)
+        dQin_dS = jax.grad(lambda s: jnp.sum(self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True)))(S)
+
+        assert jnp.allclose(dQ_dD, jnp.array([0.0, 0.0, 0.0]), atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), 1.0, atol=1e-4)
+        assert jnp.allclose(dQin_dD, jnp.array([0.0, 0.0, 0.0]), atol=1e-4)
+        assert jnp.isclose(float(dQin_dS), 1.0, atol=1e-4)
+        assert jnp.allclose(dQ_dD, dQin_dD, atol=1e-4)
+
+        # Link 1 has consumed all remaining surplus (flow = 0.7 == D_1).
+        # Any further increase in D_1 cannot increase its flow because surplus is exhausted.
+        # Thus dq_in[1] / dD[1] must be 0.0 (unpatched code produces 0.5 due to tie-point distortion).
+        dqi_dD = jax.jacobian(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True))(D)
+        assert jnp.isclose(float(dqi_dD[1, 1]), 0.0, atol=1e-4), \
+            f"Surplus exhaustion link 1 sensitivity distorted! Expected 0.0, got {dqi_dD[1, 1]}"
+
+    def test_grad_merge_3inlinks_priority_zero_degeneracy(self):
+        """Priority degeneracy (alpha_0 == 0 and sum(p) == 0).
+
+        Setting: Case A: p = [0, 1, 1]; Case B: p = [0, 0, 0].
+        Verifies safe evaluation without zero division or NaN gradients.
+        """
+        D = jnp.array([0.5, 0.5, 0.5])
+        S = jnp.float32(1.0)
+
+        # Case A: One link has priority 0
+        p_zero1 = jnp.array([0.0, 1.0, 1.0])
+        q_in = self._simulate_minimal_merge(self._factory_3in, D, p_zero1, S, return_linkwise=True)
+        assert jnp.isclose(float(q_in[0]), 0.0, atol=1e-5)
+        assert jnp.all(jnp.isfinite(q_in))
+
+        dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p_zero1, S, return_linkwise=False))(D)
+        assert jnp.all(jnp.isfinite(dQ_dD))
+
+        # Case B: All links have priority 0
+        p_allzero = jnp.array([0.0, 0.0, 0.0])
+        q_in_allzero = self._simulate_minimal_merge(self._factory_3in, D, p_allzero, S, return_linkwise=True)
+        assert jnp.all(jnp.isfinite(q_in_allzero))
+
+    def test_grad_merge_3inlinks_freeflow_hidden_congested_branch(self):
+        """Hidden congested branch evaluation under free flow (total_D < S_merge).
+
+        JAX jnp.where evaluates both branches eagerly. Under free-flow (D = [0.2, 0.2, 0.2], S = 1.0),
+        q_cong is evaluated behind the scenes. Ensure no NaN or gradient leaks occur.
+        """
+        D = jnp.array([0.2, 0.2, 0.2])
+        p = jnp.array([1.0, 1.0, 1.0])
+        S = jnp.float32(1.0)
+
+        dQ_dD = jax.grad(lambda d: self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=False))(D)
+        dQ_dS = jax.grad(lambda s: self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=False))(S)
+        dQin_dD = jax.grad(lambda d: jnp.sum(self._simulate_minimal_merge(self._factory_3in, d, p, S, return_linkwise=True)))(D)
+        dQin_dS = jax.grad(lambda s: jnp.sum(self._simulate_minimal_merge(self._factory_3in, D, p, s, return_linkwise=True)))(S)
+
+        assert jnp.all(jnp.isfinite(dQ_dD))
+        assert jnp.isfinite(dQ_dS)
+        assert jnp.all(jnp.isfinite(dQin_dD))
+        assert jnp.isfinite(dQin_dS)
+
+        assert jnp.allclose(dQ_dD, jnp.array([1.0, 1.0, 1.0]), atol=1e-4)
+        assert jnp.isclose(float(dQ_dS), 0.0, atol=1e-4)
 
 
 # ================================================================
