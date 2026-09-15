@@ -305,9 +305,11 @@ def compute_link_state(params, config):
     LinkState
     """
     q_star = params.q_star
-    w = q_star * params.u / (params.u * params.kappa - q_star)
+    denom = jnp.where(params.u * params.kappa - q_star > 0.0, params.u * params.kappa - q_star, 1e-10)
+    w = q_star * params.u / denom
+    safe_w = jnp.where(w > 0.0, w, 1e-10)
     offset_u = config.link_lengths / (params.u * config.deltat)
-    offset_w = config.link_lengths / (w * config.deltat)
+    offset_w = config.link_lengths / (safe_w * config.deltat)
     return LinkState(w=w, q_star=q_star, offset_u=offset_u, offset_w=offset_w)
 
 
@@ -461,7 +463,7 @@ def compute_supplies(t_index, state, link_state, params, config):
     S = (N_D_past + params.kappa * config.link_lengths - N_U_now) / dt
     S = jnp.minimum(S, link_state.q_star)
     S = jnp.minimum(S, params.capacity_in)
-    S = jnp.maximum(S, 0.0)
+    S = jnp.where(S < 0.0, 0.0, S)
     return S
 
 
@@ -560,27 +562,29 @@ def compute_node_transfers(t_index, demands, supplies, state, params, config):
     dummy_inflow = dummy_flow * pass_ratio
     dummy_absorbed = dummy_flow * params.absorption_ratio * dt  # (n_nodes,)
 
-    # ---- Merge (type=3): 2-input mid-value formula ----
-    D1 = in_dem[:, 0]  # (n_nodes,)
-    if config.max_in >= 2:
-        D2 = jnp.where(n_in >= 2, in_dem[:, 1], 0.0)  # (n_nodes,)
-        safe_in1 = safe_in[:, 1]
-    else:
-        D2 = jnp.zeros(n_nodes, dtype=jnp.float32)
-        safe_in1 = jnp.zeros(n_nodes, dtype=jnp.int32)
+    # ---- Merge (type=3) ----
     S_merge = jnp.minimum(out_sup[:, 0], fc)  # (n_nodes,)
-    p1 = params.merge_priority[safe_in[:, 0]]  # (n_nodes,)
-    p2 = params.merge_priority[safe_in1]        # (n_nodes,)
-    total_p = p1 + p2
-    a1 = p1 / jnp.maximum(total_p, 1e-10)
-    a2 = p2 / jnp.maximum(total_p, 1e-10)
+    total_D = jnp.sum(jnp.where(in_valid, in_dem, 0.0), axis=1)  # (n_nodes,)
+    p = jnp.where(in_valid, params.merge_priority[safe_in], 0.0)  # (n_nodes, max_in)
+    total_p = jnp.sum(p, axis=1, keepdims=True)
+    has_p = total_p > 0.0
+    safe_total_p = jnp.where(has_p, total_p, 1.0)
+    alphas = jnp.where(has_p, p / safe_total_p, 0.0)
 
-    total_D = D1 + D2
-    q1_cong = jnp.maximum(differentiable_mid(D1, S_merge - D2, a1 * S_merge), 0.0)
-    q2_cong = jnp.maximum(differentiable_mid(D2, S_merge - D1, a2 * S_merge), 0.0)
-    merge_q1 = jnp.where(total_D <= S_merge, D1, q1_cong)  # (n_nodes,)
-    merge_q2 = jnp.where(total_D <= S_merge, D2, q2_cong)  # (n_nodes,)
-    merge_q3 = merge_q1 + merge_q2  # (n_nodes,)
+    base_q = jnp.where(in_dem < alphas * S_merge[:, None], in_dem, alphas * S_merge[:, None])
+    rem_S_raw = S_merge - jnp.sum(jnp.where(in_valid, base_q, 0.0), axis=1)
+    rem_S = jnp.where(rem_S_raw > 0.0, rem_S_raw, 0.0)
+    surplus_cap = jnp.where(in_valid, in_dem - base_q, 0.0)
+    cum_surplus = jnp.cumsum(surplus_cap, axis=1)
+    avail_rem_raw = rem_S[:, None] - (cum_surplus - surplus_cap)
+    avail_rem = jnp.where(avail_rem_raw > 0.0, avail_rem_raw, 0.0)
+    extra_q = jnp.where(surplus_cap < avail_rem, surplus_cap, avail_rem)
+    q_raw = base_q + extra_q
+    sum_q_raw = jnp.sum(jnp.where(in_valid, q_raw, 0.0), axis=1, keepdims=True)
+    q_cong = q_raw + alphas * (S_merge[:, None] - sum_q_raw)
+    q_cong = jnp.where(in_valid, q_cong, 0.0)
+    merge_q_all = jnp.where(total_D[:, None] <= S_merge[:, None], in_dem, q_cong)  # (n_nodes, max_in)
+    merge_q_out = jnp.sum(jnp.where(in_valid, merge_q_all, 0.0), axis=1)  # (n_nodes,)
 
     # ---- Diverge (type=4) ----
     D_div = in_dem[:, 0]  # (n_nodes,)
@@ -648,11 +652,7 @@ def compute_node_transfers(t_index, demands, supplies, state, params, config):
 
     out_val_dest = dest_outflows  # (n_nodes, max_in)
     out_val_dummy = jnp.where(j_in == 0, dummy_outflow[:, None], 0.0)
-    if config.max_in >= 2:
-        out_val_merge = jnp.where(j_in == 0, merge_q1[:, None],
-                        jnp.where(j_in == 1, merge_q2[:, None], 0.0))
-    else:
-        out_val_merge = jnp.where(j_in == 0, merge_q1[:, None], 0.0)
+    out_val_merge = merge_q_all
     out_val_diverge = jnp.where(j_in == 0, div_flow[:, None], 0.0)
     out_val_general = inm_q_in_all
 
@@ -665,7 +665,7 @@ def compute_node_transfers(t_index, demands, supplies, state, params, config):
     # ---- Dispatch by node type: inflows for outlinks (n_nodes, max_out) ----
     in_val_origin = origin_inflows  # (n_nodes, max_out)
     in_val_dummy = jnp.where(j_out == 0, dummy_inflow[:, None], 0.0)
-    in_val_merge = jnp.where(j_out == 0, merge_q3[:, None], 0.0)
+    in_val_merge = jnp.where(j_out == 0, merge_q_out[:, None], 0.0)
     in_val_diverge = div_outflows_per_link  # (n_nodes, max_out)
     in_val_general = inm_q_out_all
 
