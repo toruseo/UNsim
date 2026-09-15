@@ -305,9 +305,11 @@ def compute_link_state(params, config):
     LinkState
     """
     q_star = params.q_star
-    w = q_star * params.u / (params.u * params.kappa - q_star)
+    denom = jnp.where(params.u * params.kappa - q_star > 0.0, params.u * params.kappa - q_star, 1e-10)
+    w = q_star * params.u / denom
+    safe_w = jnp.where(w > 0.0, w, 1e-10)
     offset_u = config.link_lengths / (params.u * config.deltat)
-    offset_w = config.link_lengths / (w * config.deltat)
+    offset_w = config.link_lengths / (safe_w * config.deltat)
     return LinkState(w=w, q_star=q_star, offset_u=offset_u, offset_w=offset_w)
 
 
@@ -461,7 +463,7 @@ def compute_supplies(t_index, state, link_state, params, config):
     S = (N_D_past + params.kappa * config.link_lengths - N_U_now) / dt
     S = jnp.minimum(S, link_state.q_star)
     S = jnp.minimum(S, params.capacity_in)
-    S = jnp.maximum(S, 0.0)
+    S = jnp.where(S < 0.0, 0.0, S)
     return S
 
 
@@ -569,17 +571,20 @@ def compute_node_transfers(t_index, demands, supplies, state, params, config):
     safe_total_p = jnp.where(has_p, total_p, 1.0)
     alphas = jnp.where(has_p, p / safe_total_p, 0.0)
 
-    base_q = jnp.minimum(in_dem, alphas * S_merge[:, None])
-    rem_S = jnp.maximum(S_merge - jnp.sum(jnp.where(in_valid, base_q, 0.0), axis=1), 0.0)
+    base_q = jnp.where(in_dem < alphas * S_merge[:, None], in_dem, alphas * S_merge[:, None])
+    rem_S_raw = S_merge - jnp.sum(jnp.where(in_valid, base_q, 0.0), axis=1)
+    rem_S = jnp.where(rem_S_raw > 0.0, rem_S_raw, 0.0)
     surplus_cap = jnp.where(in_valid, in_dem - base_q, 0.0)
     cum_surplus = jnp.cumsum(surplus_cap, axis=1)
-    extra_q = jnp.minimum(surplus_cap, jnp.maximum(rem_S[:, None] - (cum_surplus - surplus_cap), 0.0))
-    q_cong = base_q + extra_q
-    sum_q_cong = jnp.sum(jnp.where(in_valid, q_cong, 0.0), axis=1, keepdims=True)
-    scale_cong = S_merge[:, None] / jnp.where(sum_q_cong > 0.0, sum_q_cong, 1.0)
-    q_cong = jnp.where(in_valid, q_cong * scale_cong, 0.0)
+    avail_rem_raw = rem_S[:, None] - (cum_surplus - surplus_cap)
+    avail_rem = jnp.where(avail_rem_raw > 0.0, avail_rem_raw, 0.0)
+    extra_q = jnp.where(surplus_cap < avail_rem, surplus_cap, avail_rem)
+    q_raw = base_q + extra_q
+    sum_q_raw = jnp.sum(jnp.where(in_valid, q_raw, 0.0), axis=1, keepdims=True)
+    q_cong = q_raw + alphas * (S_merge[:, None] - sum_q_raw)
+    q_cong = jnp.where(in_valid, q_cong, 0.0)
     merge_q_all = jnp.where(total_D[:, None] <= S_merge[:, None], in_dem, q_cong)  # (n_nodes, max_in)
-    merge_q_out = jnp.minimum(total_D, S_merge)  # (n_nodes,)
+    merge_q_out = jnp.sum(jnp.where(in_valid, merge_q_all, 0.0), axis=1)  # (n_nodes,)
 
     # ---- Diverge (type=4) ----
     D_div = in_dem[:, 0]  # (n_nodes,)
