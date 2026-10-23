@@ -1,6 +1,6 @@
 <img align="center"><img alt="UXsim Logo" src="https://github.com/toruseo/UNsim/blob/main/docs/artworks/svg/unsim-hero-white.svg"></img>
 
-# UNsim: Python/JAX traffic simulation with Autodiff
+# UNsim: Python/JAX traffic simulator with AutoDiff
 
 [![PyPi](https://img.shields.io/pypi/v/unsim.svg)](https://pypi.python.org/pypi/unsim)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.11380-b31b1b.svg)](https://doi.org/10.48550/arXiv.2604.11380)

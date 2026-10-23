@@ -1,20 +1,46 @@
-# Prints the SVG fragments for the UNsim hero (1280x640): a single-peaked loss landscape drawn as a 3D wireframe with contour lines that
-# fade out towards the foothills, and a steepest-ascent trajectory that climbs to the summit.
-# Usage: python unsim/script/gen_surface.py [key=value ...]   (CFG holds the view, the line styles and the start of the climb; the arguments override it)
-#   unsim-hero-*.svg (foothills reaching down to the height of the summit mirrored about the canvas centre): hp=240 sq=150 start=761.5,196.8
+# Geometry of the UNsim hero (1280x592) landscape: a single-peaked loss landscape drawn as a 3D wireframe with contour lines that
+# fade out towards the foothills, and a steepest-ascent trajectory that climbs to the summit. geometry() returns the screen polylines;
+# unsim/scripts/build.py turns them into SVG (and holds the arguments used for the hero).
+# Usage for a summary: python unsim/scripts/gen_surface.py [key=value ...]   (CFG holds the view, the line widths and opacities and the start of the climb; the arguments override it)
 # Ground coordinates: p to the right, q away from the viewer, height h up (all in px). Hidden lines are removed by marching from each sample point towards the camera.
-# Screen coordinates are those of gen_diff_elements.py; the fragments carry its transform="translate(-120.5 -49.72) scale(1.17)".
-import math, os, sys
+# Screen coordinates are those of an earlier hero whose mark sat at translate(130.92 90.72) scale(0.88); the SVG places them with TF,
+# which scales them by 1.17 about (650, 316) and moves that point to (640, 296.218), the centre of the mark.
+import math, sys
 import numpy as np
 import contourpy
 from scipy.optimize import minimize
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gen_diff_elements import simplify, path_d, f1, IX0, IX1, IY0, IY1
 
-TF = 'transform="translate(-120.5 -49.72) scale(1.17)"'
+TF = 'transform="translate(-120.5 -73.502) scale(1.17)"'
+W, H_CANVAS = 1280, 592
+IX0, IX1, IY0, IY1 = 650 - 640 / 1.17, 650 + 640 / 1.17, 316 - 296.218 / 1.17, 316 + (H_CANVAS - 296.218) / 1.17   # the canvas in these coordinates
+def f1(v): return f"{v:.1f}".replace("-0.0", "0.0")
+
+def simplify(pts, tol):
+    # Douglas-Peucker
+    pts = np.asarray(pts, float)
+    if len(pts) < 3: return pts
+    keep = np.zeros(len(pts), bool); keep[0] = keep[-1] = True; stack = [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        a, b = pts[i], pts[j]; ab = b - a; n = np.hypot(*ab)
+        seg = pts[i + 1:j]
+        if len(seg) == 0: continue
+        d = np.abs(ab[0] * (seg[:, 1] - a[1]) - ab[1] * (seg[:, 0] - a[0])) / n if n > 0 else np.hypot(*(seg - a).T)
+        k = int(np.argmax(d))
+        if d[k] > tol: keep[i + 1 + k] = True; stack += [(i, i + 1 + k), (i + 1 + k, j)]
+    return pts[keep]
+def path_d(pts):
+    # absolute moveto, relative lineto
+    s = f"M{f1(pts[0][0])} {f1(pts[0][1])}"
+    px, py = round(pts[0][0], 1), round(pts[0][1], 1)
+    out = []
+    for x, y in pts[1:]:
+        x, y = round(x, 1), round(y, 1)
+        out.append(f"{f1(x - px)} {f1(y - py)}"); px, py = x, y
+    return s + ("l" + " ".join(out) if out else "")
 CFG = dict(elev=30.0, azim=-45.0, dist=1600.0, X0=640.0, Y0=316.0, k=1.0, mesh=24.0, dz=16.0, start="636,185",
            px=900.0, py=112.0, sp=140.0, sq=120.0, hp=190.0, rot=0.0,
-           mc="9FB6CE", mw=0.6, mo=0.8, cw=0.9, co=0.5, t0=0.04, t1=0.5, bins=10)
+           mw=0.6, mo=0.8, cw=0.9, co=0.5, t0=0.04, t1=0.5, bins=10)
 # outlines of the letters (screen boxes), for the clearance of the trajectory: U, N, s, dot of i, stem of i, m, tagline
 TEXT = [(604.5, 221.3, 704.3, 346.0), (711.9, 221.1, 839.5, 344.8), (838.7, 245.2, 920.1, 346.3), (930.7, 206.1, 961.2, 235.1),
         (933.4, 246.7, 958.1, 344.8), (975.5, 245.3, 1137.3, 344.8), (604.5, 378.5, 1137.3, 409.2)]
@@ -161,37 +187,22 @@ def trajectory(c, cam, hmax):
     gap = min(float(np.min(np.hypot(np.maximum(np.maximum(x0 - X, 0), X - x1), np.maximum(np.maximum(y0 - Y, 0), Y - y1)))) for x0, y0, x1, y1 in TEXT)
     return np.column_stack([X, Y]), its, f"hidden {nhid}, clearance {gap:.1f}, start height {Hp[0] / H:.2f} H", tot
 
-def fragments(over=None):
+def geometry(over=None):
+    # lines: [(is_mesh, stroke width, opacity, path data)] from the faintest to the strongest; traj: path data of the trajectory;
+    # iterates: [(x, y)]; start, end: (x, y) of the foot and of the summit; all in the TF coordinates
     global FEAT, H
     c = dict(CFG); c.update({k: type(CFG[k])(v) for k, v in (over or {}).items() if k in CFG})
     cam = Cam(c); H = hmax = c["hp"]
     FEAT = (*cam.place(c["px"], c["py"], H), c["sp"], c["sq"], H, c["rot"])
     box = ground_box(cam, hmax)
     lines = []
-    for name, runs, w, o in (("mesh", mesh(c, cam, box, hmax), c["mw"], c["mo"]), ("contours", contours(c, cam, box, hmax), c["cw"], c["co"])):
+    for is_mesh, runs, w, o in ((True, mesh(c, cam, box, hmax), c["mw"], c["mo"]), (False, contours(c, cam, box, hmax), c["cw"], c["co"])):
         for lev, pls in sorted(by_opacity(runs, c).items()):
-            d = " ".join(path_d(simplify(pl, 0.35)) for pl in pls)
-            col = f' stroke="#{c["mc"]}"' if name == "mesh" else ""
-            lines.append(f'    <path{col} stroke-width="{w}" stroke-opacity="{o * lev / c["bins"]:.3f}" d="{d}"/>\n')
+            lines.append((is_mesh, w, o * lev / c["bins"], " ".join(path_d(simplify(pl, 0.35)) for pl in pls)))
     T, its, tinfo, tot = trajectory(c, cam, hmax)
     Ts = simplify(T, 0.25); a, b = T[0], T[-1]
-    # colours: blue at the foot, yellow at the summit
-    stops = [("0", "#306998"), (".3", "#5A9FD4"), (".65", "#F5B800"), ("1", "#FFD43B")]
-    defs = (f'    <linearGradient id="unsim-hero-white-route" gradientUnits="userSpaceOnUse" x1="{f1(a[0])}" y1="{f1(a[1])}" x2="{f1(b[0])}" y2="{f1(b[1])}">'
-            + "".join(f'<stop offset="{o}" stop-color="{col}"/>' for o, col in stops) + "</linearGradient>\n")
-    land = ('  <!-- Loss landscape with a single peak: wireframe and contour lines seen in perspective, hidden lines removed; the lines fade out towards the foothills; unsim/script/gen_surface.py -->\n'
-            f'  <g {TF} fill="none" stroke="#306998" stroke-linejoin="round">\n' + "".join(lines) + '  </g>\n')
-    traj = ('  <!-- Steepest ascent to the summit; the white dots are iterates with geometrically shrinking steps -->\n'
-            f'  <g {TF}>\n'
-            '    <g fill="none" stroke-linecap="round" stroke-linejoin="round">\n'
-            f'      <path stroke="#fff" stroke-width="7.2" d="{path_d(Ts)}"/>\n'
-            f'      <path stroke="url(#unsim-hero-white-route)" stroke-width="4" d="{path_d(Ts)}"/>\n    </g>\n'
-            '    <g fill="#fff">\n' + "".join(f'      <circle cx="{f1(x)}" cy="{f1(y)}" r="1.4"/>\n' for x, y in its) + '    </g>\n'
-            f'    <circle cx="{f1(a[0])}" cy="{f1(a[1])}" r="4.2" fill="#fff" stroke="#306998" stroke-width="2.4"/>\n'
-            f'    <circle cx="{f1(b[0])}" cy="{f1(b[1])}" r="6.2" fill="#F5B800" stroke="#fff" stroke-width="2.4"/>\n  </g>\n')
-    info = f"box {[round(v) for v in box]} paths {len(lines)} chars {sum(len(l) for l in lines)} traj {f1(a[0])},{f1(a[1])} -> {f1(b[0])},{f1(b[1])} len {tot:.0f} {tinfo}"
-    return dict(defs=defs, land=land, traj=traj, info=info)
+    info = f"box {[round(v) for v in box]} paths {len(lines)} chars {sum(len(l[3]) for l in lines)} traj {f1(a[0])},{f1(a[1])} -> {f1(b[0])},{f1(b[1])} len {tot:.0f} {tinfo}"
+    return dict(lines=lines, traj=path_d(Ts), iterates=its, start=(a[0], a[1]), end=(b[0], b[1]), info=info)
 
 if __name__ == "__main__":
-    fr = fragments(dict(a.split("=", 1) for a in sys.argv[1:]))
-    print("INFO", fr["info"]); print("DEFS"); print(fr["defs"], end=""); print("LAND"); print(fr["land"], end=""); print("TRAJ"); print(fr["traj"], end="")
+    print(geometry(dict(a.split("=", 1) for a in sys.argv[1:]))["info"])

@@ -1,4 +1,7 @@
-# UNsim: Traffic simulation with Autodiff
+# UNsim: Traffic simulator with AutoDiff
+
+<img width="400" alt="UNsim logo" class="only-light" src="https://raw.githubusercontent.com/toruseo/UNsim/refs/heads/main/docs/artworks/png/unsim-hero-transparent-light%402x.png" />
+<img width="400" alt="UNsim logo" class="only-dark" src="https://raw.githubusercontent.com/toruseo/UNsim/refs/heads/main/docs/artworks/png/unsim-hero-transparent-dark%402x.png" />
 
 UNsim is a differentiable macroscopic network traffic simulator in Python.
 It also provides a JAX-based differentiable simulation engine that enables lightning fast simulation using GPU and gradient-based applications such as OD demand calibration.
