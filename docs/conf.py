@@ -34,15 +34,12 @@ html_theme = "furo"
 
 html_title = "UNsim: Traffic Simulation with Autodiff v0 documentation"
 
-html_static_path = ["_static", "artworks/svg"]
+html_static_path = ["_static"]
 
-html_theme_options = {
-    "light_logo": "unsim-logo-transparent-light.svg",
-    "dark_logo": "unsim-logo-transparent-dark.svg",
-    "sidebar_hide_name": True,
-}
+# Sidebar logo (without title text) is set in _templates/sidebar/brand.html
+templates_path = ["_templates"]
 
-html_favicon = "artworks/png/unsim-icon-transparent-light@2x.png"
+html_favicon = "https://raw.githubusercontent.com/toruseo/UNsim/refs/heads/main/docs/artworks/png/unsim-icon-transparent-light%402x.png"
 
 # Google Analytics
 html_js_files = [
