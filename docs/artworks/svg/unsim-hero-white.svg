@@ -59,11 +59,8 @@
     <path fill="none" stroke="#fff" stroke-width="8" stroke-dasharray="29.01 20.30" d="M413.82 211.41 C419.77 232.46 421.45 254.71 418.72 276.41 C416.00 298.12 408.88 319.26 397.92 338.19 C386.96 357.11 372.17 373.81 354.70 386.98 A164.00 164.00 0 1 1 256.00 92.00"/>
     <!-- Eye -->
     <circle cx="360.39" cy="101.24" r="10.1" fill="#fff"/>
-    <!-- Nabla N in the centre: a triangle with sharp corners drawn on the increment sign of Poppins SemiBold, and the N of Poppins SemiBold Italic (SIL OFL 1.1) -->
-    <g transform="translate(166.5 299.75) scale(0.125)" fill="#306998">
-      <path d="M20 -700H694L357 0Z M497.7 -592H216.3L357 -299.7Z"/>
-      <path d="M1289 0H1148L917 -479L832 0H691L815 -699H955L1187 -219L1272 -699H1412Z"/>
-    </g>
+    <!-- Nabla N in the centre: a triangle with sharp corners drawn on the increment sign of Poppins SemiBold, and the N of Poppins SemiBold Italic (SIL OFL 1.1); one path, so that the yellow outline of either part never covers the fill of the other -->
+    <path transform="translate(166.5 299.75) scale(0.125)" fill="#306998" stroke="#FFD43B" stroke-width="24" stroke-linejoin="round" paint-order="stroke" d="M20 -700H694L357 0Z M497.7 -592H216.3L357 -299.7Z M1289 0H1148L917 -479L832 0H691L815 -699H955L1187 -219L1272 -699H1412Z"/>
   </g>
   <!-- White outline (4 px) under the wordmark and the tagline, so that the lines of the landscape stop short of the letters -->
   <g transform="translate(572.947 329.855) scale(0.206961)" fill="#fff" stroke="#fff" stroke-width="38.7" stroke-linejoin="round">

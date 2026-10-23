@@ -33,7 +33,8 @@ NABLA = "M20 -700H694L357 0Z M497.7 -592H216.3L357 -299.7Z"
 NABLA_BOX = (20, -700, 694, 0)
 NABLA_N = [("SemiBoldItalic", "N", 674)]
 NABLA_SCALE = 0.125
-NABLA_FILL = {"light": "#306998", "dark": "#FFD43B"}
+NABLA_FILL, NABLA_OUTLINE = "#306998", "#FFD43B"
+NABLA_OUTLINE_W = 1.5  # width of the yellow outline outside the fill, in the mark's coordinates (512 x 512)
 
 # Hero: loss landscape (gen_surface.py) with the foothills reaching down to the height of the summit mirrored about the canvas centre
 SURFACE = dict(hp=240, sq=150, start="761.5,196.8", t1=0.3)
@@ -44,15 +45,15 @@ START_R, END_R, END_STROKE = 4.2, 6.2, 2.4   # start and summit markers; the hal
 TEXT_GAP = 4                      # px: the lines of the landscape stop this far from the wordmark and the tagline
 
 
-def nabla_n(style, kind, n_path, n_bbox):
+def nabla_n(n_path, n_bbox):
     x0, y0 = min(NABLA_BOX[0], n_bbox[0]), min(NABLA_BOX[1], n_bbox[1])
     x1, y1 = max(NABLA_BOX[2], n_bbox[2]), max(NABLA_BOX[3], n_bbox[3])
     x, y = 256 - (x0 + x1) / 2 * NABLA_SCALE, 256 - (y0 + y1) / 2 * NABLA_SCALE
-    attrs = f'transform="{sp.tf(x, y, NABLA_SCALE)}" fill="{NABLA_FILL[sp.palette(style)]}"'
-    if style == "transparent-outline":
-        attrs += f' stroke="#fff" stroke-width="{sp.sw(sp.OUTLINE_PX[kind], sp.MARK_TF[kind][2] * NABLA_SCALE)}" stroke-linejoin="round" paint-order="stroke"'
-    return ("  <!-- Nabla N in the centre: a triangle with sharp corners drawn on the increment sign of Poppins SemiBold, and the N of Poppins SemiBold Italic (SIL OFL 1.1) -->\n"
-            f"  <g {attrs}>\n    <path d=\"{NABLA}\"/>\n    <path d=\"{n_path}\"/>\n  </g>\n")
+    attrs = (f'transform="{sp.tf(x, y, NABLA_SCALE)}" fill="{NABLA_FILL}" stroke="{NABLA_OUTLINE}" stroke-width="{sp.sw(NABLA_OUTLINE_W, NABLA_SCALE)}"'
+             ' stroke-linejoin="round" paint-order="stroke"')
+    return ("  <!-- Nabla N in the centre: a triangle with sharp corners drawn on the increment sign of Poppins SemiBold, and the N of Poppins SemiBold Italic (SIL OFL 1.1);"
+            " one path, so that the yellow outline of either part never covers the fill of the other -->\n"
+            f"  <path {attrs} d=\"{NABLA} {n_path}\"/>\n")
 
 
 def text_outlines(wm, tag, colour):
@@ -106,18 +107,18 @@ def main():
     wm = [d for d, _ in wm_paths]
     wm_xmax = wm_paths[1][1][2]
     tag = [d for d, _ in glyphs.text("Regular", TAGLINE, TAGLINE_GROUPS)]
-    n_path, n_bbox = glyphs.glyphs(NABLA_N)
+    inner = nabla_n(*glyphs.glyphs(NABLA_N))
     geo = gen_surface.geometry(SURFACE)
     print(geo["info"])
     svg_dir = os.path.join(ROOT, NAME, "svg")
     os.makedirs(svg_dir, exist_ok=True)
     for style in sp.STYLES:
         p = f"{NAME}-icon-{style}"
-        sp.write(os.path.join(svg_dir, p + ".svg"), sp.icon_doc(p, style, TITLE, nabla_n(style, "icon", n_path, n_bbox)))
+        sp.write(os.path.join(svg_dir, p + ".svg"), sp.icon_doc(p, style, TITLE, inner))
         p = f"{NAME}-logo-{style}"
-        sp.write(os.path.join(svg_dir, p + ".svg"), sp.logo_doc(p, style, TITLE, wm, wm_xmax, WM_COMMENT, nabla_n(style, "logo", n_path, n_bbox)))
+        sp.write(os.path.join(svg_dir, p + ".svg"), sp.logo_doc(p, style, TITLE, wm, wm_xmax, WM_COMMENT, inner))
         p = f"{NAME}-hero-{style}"
-        sp.write(os.path.join(svg_dir, p + ".svg"), hero(style, wm, tag, nabla_n(style, "hero", n_path, n_bbox), geo))
+        sp.write(os.path.join(svg_dir, p + ".svg"), hero(style, wm, tag, inner, geo))
     export_png.export(svg_dir, os.path.join(ROOT, NAME, "png"), os.path.join(ROOT, "tmp", "chrome-profile"))
 
 
