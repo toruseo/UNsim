@@ -32,7 +32,7 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "furo"
 
-html_title = "UNsim: Traffic Simulation with Autodiff v0 documentation"
+html_title = "UNsim: Traffic simulator with AutoDiff v0 documentation"
 
 html_static_path = ["_static"]
 
