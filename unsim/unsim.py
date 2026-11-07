@@ -3,6 +3,7 @@ UNsim: Network Link Transmission Model (LTM) simulator.
 """
 
 import numpy as np
+from bisect import bisect_right
 from collections import defaultdict
 from heapq import heappush, heappop
 
@@ -56,6 +57,51 @@ def _interp(array, fractional_index):
     i_low = int(fractional_index)
     frac = fractional_index - i_low
     return array[i_low] * (1 - frac) + array[i_low + 1] * frac
+
+
+_FLAT_TOL = 1e-6  # veh; segments of the cumulative curve narrower than this are treated as flat
+
+
+def _fifo_lookup(cum_agg, cum_d, value, t_max):
+    """Per-destination cumulative counts at a given rank of the aggregate cumulative curve.
+
+    Inverts the piecewise linear curve ``cum_agg`` to find tau <= t_max with cum_agg(tau) = value, and returns cum_d(:, tau).
+    This expresses FIFO: the destination composition of vehicles leaving at rank N_D(t) equals the composition at the time they entered, N_U(tau) = N_D(t), so that N_D^s(t) = N_U^s(tau).
+
+    Parameters
+    ----------
+    cum_agg : sequence[float]
+        Aggregate cumulative curve, non-decreasing, indexed by timestep.
+    cum_d : np.ndarray
+        Per-destination cumulative curves of shape (n_dests, T+1) whose sum over destinations equals ``cum_agg``.
+    value : float
+        Rank N on the aggregate curve.
+    t_max : int
+        Largest timestep index allowed for tau. Values beyond cum_agg[t_max] are clipped to cum_d[:, t_max].
+
+    Returns
+    -------
+    np.ndarray
+        Per-destination cumulative counts at rank ``value``, shape (n_dests,).
+    """
+    if t_max <= 0:
+        return cum_d[:, 0].copy()
+    j = bisect_right(cum_agg, value, 0, t_max + 1) - 1
+    j = min(max(j, 0), t_max - 1)
+    lo = cum_agg[j]
+    hi = cum_agg[j + 1]
+    # Segments narrower than _FLAT_TOL vehicles are treated as flat (same rule as the JAX version,
+    # where 1/(hi - lo) of a denormal-sized segment would overflow in the backward pass)
+    if hi - lo > _FLAT_TOL:
+        frac = min(max((value - lo) / (hi - lo), 0.0), 1.0)
+    else:
+        frac = 0.0
+    # Exact endpoints and a + frac*(b-a) form (exact where a == b), so that a
+    # destination absent from the segment gets exactly zero: the INM blocks on
+    # any positive turning fraction, so rounding dust must not leak into cohorts.
+    if frac >= 1.0:
+        return cum_d[:, j + 1].copy()
+    return cum_d[:, j] + frac * (cum_d[:, j + 1] - cum_d[:, j])
 
 
 class Node:
@@ -431,6 +477,10 @@ class Node:
         q_in = [0.0] * I
         q_out = [0.0] * J
         EPS = 1e-10
+        # Turning fractions below EPS_B do not count as "sending to j" in the FIFO
+        # blocking rule, so that numerically negligible per-destination flows cannot
+        # block an inlink (keeps Python and JAX results consistent).
+        EPS_B = 1e-6
 
         for _ in range(I + J + 1):
             # D_up: inlinks that can still send flow (FIFO condition)
@@ -440,7 +490,7 @@ class Node:
                     continue
                 blocked = False
                 for j in range(J):
-                    if B[i][j] > 0 and q_out[j] >= Sigma[j] - EPS:
+                    if B[i][j] > EPS_B and q_out[j] >= Sigma[j] - EPS:
                         blocked = True
                         break
                 D_up[i] = not blocked
@@ -451,7 +501,7 @@ class Node:
                 if q_out[j] >= Sigma[j] - EPS:
                     continue
                 for i in range(I):
-                    if D_up[i] and B[i][j] > 0:
+                    if D_up[i] and B[i][j] > EPS_B:
                         D_down[j] = True
                         break
 
@@ -1027,6 +1077,23 @@ class World:
         If True, automatically compute diverge/absorption ratios from OD demand
         composition and shortest paths. If False (default), use ratios specified
         in addNode (diverge_ratio, absorption_ratio).
+    route_choice : str or None, optional
+        "fix" (default), "aon", "duo", "duo_multipoint" or "duo_logit".
+    logit_temperature : float, optional
+        Temperature (s) of the logit route choice. Default 60.
+    node_fifo : str, optional
+        Per-destination allocation at nodes in the destination-aware modes
+        ("aon", "duo", "duo_multipoint", "duo_logit"). "fix" is a single-commodity
+        model without destination classes, so the option has no effect there.
+        "strict" (default): FIFO by the inverse mapping of the cumulative curves,
+        N_D^s(t) = N_U^s(tau), N_U(tau) = N_D(t); turning fractions from the
+        composition of each inlink's sending cohort.
+        "coarse": lightweight approximation. Departures are allocated in
+        proportion to the composition of all vehicles that have entered the link,
+        turning fractions from the composition of the vehicles on the inlinks
+        (shared by all inlinks of a node), and origin queues depart in proportion
+        to the queued composition. Does not need the per-destination arrival
+        history and violates FIFO.
 
     Attributes
     ----------
@@ -1041,7 +1108,10 @@ class World:
     def __init__(s, name="", deltat=None, tmax=2000, print_mode=1,
                  save_mode=1, show_mode=0, reaction_time=1,
                  random_seed=None, auto_diverge=False,
-                 route_choice=None, logit_temperature=60.0, **kwargs):
+                 route_choice=None, logit_temperature=60.0, node_fifo="strict", **kwargs):
+        if node_fifo not in ("strict", "coarse"):
+            raise ValueError(f"node_fifo must be 'strict' or 'coarse', got {node_fifo!r}")
+        s.NODE_FIFO = node_fifo
         s.NAME = name
         s.DELTAT = deltat  # None = auto-compute in finalize_scenario
         s.TMAX = tmax
@@ -1488,16 +1558,7 @@ class World:
             s._duo_cum_arr_snapshot = np.empty(n_links)
             s._duo_cum_dep_snapshot = np.empty(n_links)
 
-            # Assign link indices for fast lookup
             link_name_to_idx = {l.name: i for i, l in enumerate(s.LINKS)}
-            for i, link in enumerate(s.LINKS):
-                link._duo_idx = i
-
-            # Per-node outlink index sets (for fast membership check in routing)
-            s._duo_node_outlink_idxs = []
-            for node in s.NODES:
-                s._duo_node_outlink_idxs.append(
-                    set(link_name_to_idx[ln] for ln in node.outlinks))
 
             # Node index for classified node lists
             node_name_to_idx = s._duo_node_idx
@@ -1536,9 +1597,18 @@ class World:
                 link._ifd = s._duo_all_ifd[i]
                 link._ofd = s._duo_all_ofd[i]
 
-            # Pre-allocate work arrays for FIFO step
-            s._duo_all_cum_arr = np.empty(n_links_total)
-            s._duo_all_outflow = np.empty(n_links_total)
+            # Outlink index lists per node, in node.outlinks order (routing matrices use this order)
+            s._duo_node_outlink_ids = [
+                [link_name_to_idx[ln] for ln in node.outlinks] for node in s.NODES]
+
+            # Origin vertical queues: per-destination cumulative demand and departure curves
+            s._duo_orig_cum_dem = {}      # {orig_name: (n_dests, TSIZE+1)}
+            s._duo_orig_cum_dem_agg = {}  # {orig_name: (TSIZE+1,)}
+            s._duo_orig_cum_out = {}      # {orig_name: (n_dests, TSIZE+1)}
+            for node in s._duo_origin_nodes:
+                s._duo_orig_cum_dem[node.name] = np.zeros((n_dests, s.TSIZE + 1))
+                s._duo_orig_cum_dem_agg[node.name] = np.zeros(s.TSIZE + 1)
+                s._duo_orig_cum_out[node.name] = np.zeros((n_dests, s.TSIZE + 1))
 
             # Pre-build per-origin demand arrays: {orig_name: np.array of shape (n_dests,)}
             # for each distinct time window
@@ -1667,7 +1737,8 @@ class World:
         n_links = len(s.LINKS)
         link_tt_arr = np.empty(n_links)
         if tt_method == "avg_density":
-            t_idx = max(0, min(int(t_seconds / s.DELTAT), s.TSIZE - 1))
+            # round: t_seconds = T * DELTAT may evaluate to T - 1e-15 in floating point
+            t_idx = max(0, min(int(round(t_seconds / s.DELTAT)), s.TSIZE - 1))
             # Vectorized travel time computation
             cum_arr = s._duo_cum_arr_snapshot
             cum_dep = s._duo_cum_dep_snapshot
@@ -1763,8 +1834,12 @@ class World:
 
         dt = s.DELTAT
 
-        # Route update frequency: default 5 minute interval
-        if route_update_interval is None:
+        # Route update frequency: default 5 minute interval.
+        # "aon" keeps the free-flow shortest paths (the trees computed at t=0 on empty links),
+        # matching unsim_diff.simulate_aon.
+        if s.ROUTE_CHOICE == "aon":
+            route_update_interval = s.TSIZE + 1
+        elif route_update_interval is None:
             route_update_interval = max(1, int(300 / dt))
 
         # Pre-cache local references for inner loop performance
@@ -1774,12 +1849,16 @@ class World:
         dest_nodes = s._duo_destination_nodes
         other_nodes = s._duo_other_nodes
         multi_out_nodes = s._duo_multi_out_nodes
-        dest_set = s._duo_dest_set
         n_dests = len(destinations)
-        d2i = s._duo_dest_to_idx
-        demand_windows = s._duo_demand_windows
-        outlink_idx_sets = s._duo_node_outlink_idxs
         node_name_to_idx = s._duo_node_idx
+        outlink_ids = s._duo_node_outlink_ids
+        all_ca_d = s._duo_all_ca_d
+        all_cd_d = s._duo_all_cd_d
+        all_ifd = s._duo_all_ifd
+        all_ofd = s._duo_all_ofd
+        link_end_idx = s._duo_link_to_idx
+        n_links_t = len(LINKS)
+        n_nodes_t = len(s.NODES)
 
         # Pre-build inlink lists
         for node in s.NODES:
@@ -1788,181 +1867,128 @@ class World:
         tree_arr = None  # (n_dests, n_nodes) int32
         dist_arr = None  # (n_dests, n_nodes) float, for duo_logit
         link_cost_arr = None  # (n_links,) float, for duo_logit
+        route_P = None  # per-node routing matrices (n_dests, n_out)
         use_logit = (s.ROUTE_CHOICE == "duo_logit")
-        logit_temp = s.LOGIT_TEMPERATURE
-        link_to_idx = s._duo_link_to_idx  # end-node index for each link
+        strict = (s.NODE_FIFO == "strict")
 
         while s.T < t_end:
             s.TIME = s.T * dt
             t_sec = s.TIME
+            T = s.T
+            T1 = T + 1
 
-            if s.print_mode and s.T % max(1, t_end // 20) == 0:
-                print(f"  DUO step {s.T}/{t_end}, t={s.TIME:.0f}s", flush=True)
+            if s.print_mode and T % max(1, t_end // 20) == 0:
+                print(f"  DUO step {T}/{t_end}, t={s.TIME:.0f}s", flush=True)
 
             # Step 1: Compute aggregate demands/supplies (vectorized LTM)
             demands = {}
             supplies = {}
             for link in LINKS:
-                demands[link] = link.compute_demand(s.T)
-                supplies[link] = link.compute_supply(s.T)
-            # Also build arrays for Step 6
-            n_links_t = len(LINKS)
+                demands[link] = link.compute_demand(T)
+                supplies[link] = link.compute_supply(T)
 
-            # Step 2-3: Update shortest path trees periodically
-            if tree_arr is None or s.T % route_update_interval == 0:
-                result = s._duo_shortest_trees(t_sec)
+            # Step 2-3: Update shortest path trees and routing matrices periodically
+            if tree_arr is None or T % route_update_interval == 0:
+                # aon: travel times of the empty network (t=0), also when resumed via duration_t
+                result = s._duo_shortest_trees(0.0 if s.ROUTE_CHOICE == "aon" else t_sec)
                 if use_logit:
                     tree_arr, dist_arr, link_cost_arr = result
                 else:
                     tree_arr = result
+                route_P = s._duo_route_matrices(tree_arr, dist_arr, link_cost_arr)
 
-            # Step 4: Compute dynamic diverge ratios for multi-output nodes only
-            T = s.T
+            # Step 4: Diverge ratios / turning fractions from the destination composition
+            # of each inlink's sending cohort, i.e. the vehicles that can leave in this step:
+            # ranks N_D(T) to N_D(T) + D*dt on the cumulative curves, S^s = N_U^s(tau_D) - N_D^s(T)
+            # with N_U(tau_D) = N_D(T) + D*dt (same inverse mapping as the FIFO departures).
             for node in multi_out_nodes:
-                outlink_flow = defaultdict(float)
-                total_flow = 0.0
                 ni = node_name_to_idx[node.name]
-                inlinks = node._inlink_list
-                outlink_names = node.outlinks
-                oidx_set = outlink_idx_sets[ni]
-                # Gather inlink vehicle counts: vectorize over dests
-                if len(inlinks) == 1:
-                    n_d_all = inlinks[0]._ca_d[:, T] - inlinks[0]._cd_d[:, T]
+                P = route_P[ni]
+                n_out = len(outlink_ids[ni])
+                B = node.turning_fraction_matrix
+                agg_to_out = np.zeros(n_out)
+                for i, inlink in enumerate(node._inlink_list):
+                    if strict:
+                        N_send = inlink.cum_departure[T] + dt * demands[inlink]
+                        send_d = _fifo_lookup(inlink.cum_arrival, inlink._ca_d, N_send, T) - inlink._cd_d[:, T]
+                    else:
+                        # coarse: composition of all vehicles on the inlink
+                        send_d = inlink._ca_d[:, T] - inlink._cd_d[:, T]
+                    to_out = np.maximum(send_d, 0.0) @ P
+                    agg_to_out += to_out
+                    if B is not None and strict:
+                        total_i = to_out.sum()
+                        if total_i > 1e-10:
+                            B[i][:] = to_out / total_i
+                        else:
+                            B[i][:] = [1.0 / n_out] * n_out
+                total = agg_to_out.sum()
+                if total > 1e-10:
+                    ratios = agg_to_out / total
                 else:
-                    n_d_all = np.zeros(n_dests)
-                    for inlink in inlinks:
-                        n_d_all += inlink._ca_d[:, T] - inlink._cd_d[:, T]
-                # Only process dests with vehicles
-                active = np.where(n_d_all > 1e-10)[0]
-                if use_logit:
-                    # Logit-based soft routing
-                    outlinks_list = list(outlink_names.values())
-                    outlink_ids = [ol._duo_idx for ol in outlinks_list]
-                    for di in active:
-                        costs = np.array([
-                            link_cost_arr[li] + dist_arr[di, link_to_idx[li]]
-                            for li in outlink_ids])
-                        costs_shifted = costs - costs.min()
-                        weights = np.exp(-costs_shifted / logit_temp)
-                        probs = weights / weights.sum()
-                        for j, li in enumerate(outlink_ids):
-                            outlink_flow[li] += n_d_all[di] * probs[j]
-                        total_flow += n_d_all[di]
-                else:
-                    for di in active:
-                        li = tree_arr[di, ni]
-                        if li >= 0 and li in oidx_set:
-                            outlink_flow[li] = outlink_flow.get(li, 0.0) + n_d_all[di]
-                            total_flow += n_d_all[di]
+                    ratios = np.full(n_out, 1.0 / n_out)
+                for j, outlink_name in enumerate(node.outlinks):
+                    node.diverge_ratios[outlink_name] = ratios[j]
+                if B is not None and not strict:
+                    # coarse: all inlinks share the node-level ratios
+                    for i in range(len(node._inlink_list)):
+                        B[i][:] = ratios
 
-                if total_flow > 1e-10:
-                    inv_total = 1.0 / total_flow
-                    for outlink_name, outlink in outlink_names.items():
-                        node.diverge_ratios[outlink_name] = outlink_flow.get(outlink._duo_idx, 0.0) * inv_total
-                else:
-                    n_out = len(outlink_names)
-                    eq = 1.0 / n_out
-                    for outlink_name in outlink_names:
-                        node.diverge_ratios[outlink_name] = eq
-
-            # Step 4b: Sync turning_fraction_matrix for general nodes
-            for node in other_nodes:
-                if node.turning_fraction_matrix is not None:
-                    outlinks_list = list(node.outlinks.values())
-                    dr = node.diverge_ratios
-                    for i in range(len(node.turning_fraction_matrix)):
-                        for j, ol in enumerate(outlinks_list):
-                            node.turning_fraction_matrix[i][j] = dr.get(ol.name, 0.0)
-
-            # Step 5: Node models -> aggregate inflow/outflow rates
+            # Step 5: Node models -> aggregate inflow/outflow rates.
+            # Origins also write their per-destination outlink inflows into all_ifd.
             for link in LINKS:
                 link.inflow_rate = 0.0
                 link.outflow_rate = 0.0
+            all_ifd[:] = 0.0
 
             for node in origin_nodes:
-                s._duo_transfer_origin(node, T, demands, supplies, tree_arr)
+                s._duo_transfer_origin(node, T, supplies, route_P[node_name_to_idx[node.name]])
             for node in dest_nodes:
                 for inlink in node._inlink_list:
                     inlink.outflow_rate = demands[inlink]
             for node in other_nodes:
                 node.compute_transfer(T, demands, supplies)
 
-            # Step 6: FIFO - fully vectorized across all links
-            all_ca_d = s._duo_all_ca_d
-            all_cd_d = s._duo_all_cd_d
-            all_ifd = s._duo_all_ifd
-            all_ofd = s._duo_all_ofd
-            cum_arr_t = s._duo_all_cum_arr
-            outflow_t = s._duo_all_outflow
+            # Step 6: per-destination departures.
+            # strict: FIFO from the cumulative curves, N_D^s(T+1) = N_U^s(tau) with N_U(tau) = N_D(T+1).
+            # coarse: in proportion to the composition of all vehicles that have entered the link.
             for i in range(n_links_t):
-                cum_arr_t[i] = LINKS[i].cum_arrival[T]
-                outflow_t[i] = LINKS[i].outflow_rate
-            ratio = np.where(cum_arr_t > 1e-10,
-                             outflow_t / np.maximum(cum_arr_t, 1e-10), 0.0)
-            all_ofd[:] = all_ca_d[:, :, T] * ratio[:, None]
+                link = LINKS[i]
+                N_D_new = link.cum_departure[T] + dt * link.outflow_rate
+                if strict:
+                    cd_new = _fifo_lookup(link.cum_arrival, all_ca_d[i], N_D_new, T)
+                    all_ofd[i] = (cd_new - all_cd_d[i, :, T]) / dt
+                else:
+                    N_U = link.cum_arrival[T]
+                    all_ofd[i] = all_ca_d[i, :, T] * (link.outflow_rate / N_U if N_U > 1e-10 else 0.0)
+                    cd_new = all_cd_d[i, :, T] + dt * all_ofd[i]
+                all_cd_d[i, :, T1] = cd_new
+                link.cum_departure[T1] = N_D_new
 
-            # Step 7: Per-destination inflow routing + absorption
-            all_ifd[:] = 0.0
-            n_nodes_t = len(s.NODES)
-            link_end_idx = s._duo_link_to_idx
-
+            # Step 7: Route per-destination outflows to downstream links
             # 7a: Gather inlink outflows to nodes (one scatter operation)
             node_arriving = np.zeros((n_nodes_t, n_dests))
             np.add.at(node_arriving, link_end_idx, all_ofd)
 
-            # 7b: Add origin demand
-            for node in origin_nodes:
-                ni = node_name_to_idx[node.name]
-                windows = demand_windows.get(node.name, [])
-                for (t_start, t_end_d), darr in windows:
-                    if t_start <= t_sec < t_end_d:
-                        node_arriving[ni] += darr
-
-            # 7c: Absorb at destinations
+            # 7b: Absorb at destinations
             absorbed_counts = s._duo_absorbed_arr
             for di in range(n_dests):
                 ni = s._duo_dest_node_idxs[di]
-                val = node_arriving[ni, di]
-                if val > 1e-15:
-                    absorbed_counts[ni] += val * dt
-                    node_arriving[ni, di] = 0.0
+                absorbed_counts[ni] += node_arriving[ni, di] * dt
+                node_arriving[ni, di] = 0.0
 
-            # 7d: Route active traffic via shortest path trees (or logit)
-            active_ni, active_di = np.where(node_arriving > 1e-15)
-            if use_logit:
-                for k in range(len(active_ni)):
-                    ni = active_ni[k]
-                    di = active_di[k]
-                    oidx = outlink_idx_sets[ni]
-                    if not oidx:
-                        continue
-                    oidx_list = list(oidx)
-                    costs = np.array([
-                        link_cost_arr[li] + dist_arr[di, link_to_idx[li]]
-                        for li in oidx_list])
-                    costs_shifted = costs - costs.min()
-                    weights = np.exp(-costs_shifted / logit_temp)
-                    probs = weights / weights.sum()
-                    flow = node_arriving[ni, di]
-                    for j, li in enumerate(oidx_list):
-                        all_ifd[li, di] += flow * probs[j]
-            else:
-                for k in range(len(active_ni)):
-                    ni = active_ni[k]
-                    di = active_di[k]
-                    li = tree_arr[di, ni]
-                    if li >= 0 and li in outlink_idx_sets[ni]:
-                        all_ifd[li, di] += node_arriving[ni, di]
+            # 7c: Route via the routing matrices
+            for ni in np.where(node_arriving.sum(axis=1) > 1e-15)[0]:
+                P = route_P[ni]
+                if P is None:
+                    continue
+                all_ifd[outlink_ids[ni]] += P.T * node_arriving[ni][None, :]
 
-            # Step 8: Update cumulative counts - fully vectorized across all links
-            T1 = T + 1
+            # Step 8: Update cumulative arrival counts (departures were set in Step 6)
             all_ca_d[:, :, T1] = all_ca_d[:, :, T] + dt * all_ifd
-            all_cd_d[:, :, T1] = all_cd_d[:, :, T] + dt * all_ofd
             agg_arr = all_ifd.sum(axis=1) * dt  # (n_links,)
-            agg_dep = all_ofd.sum(axis=1) * dt
             for i in range(n_links_t):
                 LINKS[i].cum_arrival[T1] = LINKS[i].cum_arrival[T] + agg_arr[i]
-                LINKS[i].cum_departure[T1] = LINKS[i].cum_departure[T] + agg_dep[i]
 
             s.T += 1
 
@@ -1979,93 +2005,106 @@ class World:
         if s.T >= s.TSIZE and s.print_mode:
             print(f" Simulation completed (DUO). {s.NAME}")
 
-    def _duo_transfer_origin(s, node, t_index, demands, supplies, tree_arr):
-        """Origin node transfer for DUO: aggregate demand from all OD pairs.
+    def _duo_route_matrices(s, tree_arr, dist_arr, link_cost_arr):
+        """Build per-node routing matrices from the current shortest path trees.
+
+        Parameters
+        ----------
+        tree_arr : np.ndarray, shape (n_dests, n_nodes), int32
+            Next-hop link index per destination and node (-1 if unreachable).
+        dist_arr : np.ndarray or None
+            Shortest distances (n_dests, n_nodes). Used for duo_logit only.
+        link_cost_arr : np.ndarray or None
+            Generalized link costs (n_links,). Used for duo_logit only.
+
+        Returns
+        -------
+        list[np.ndarray or None]
+            route_P[ni] has shape (n_dests, n_out) and gives the fraction of destination-d flow leaving node ni through each outlink, ordered as ``s._duo_node_outlink_ids[ni]``.
+            None for nodes without outlinks.
+            A row is all zeros when the destination is unreachable from the node (hard routing).
+        """
+        route_P = []
+        for ni, oids in enumerate(s._duo_node_outlink_ids):
+            if not oids:
+                route_P.append(None)
+                continue
+            oids_arr = np.asarray(oids)
+            if s.ROUTE_CHOICE == "duo_logit":
+                costs = link_cost_arr[oids_arr][None, :] + dist_arr[:, s._duo_link_to_idx[oids_arr]]
+                costs = costs - costs.min(axis=1, keepdims=True)
+                weights = np.exp(-costs / s.LOGIT_TEMPERATURE)
+                P = weights / weights.sum(axis=1, keepdims=True)
+            else:
+                P = (tree_arr[:, ni][:, None] == oids_arr[None, :]).astype(float)
+            route_P.append(P)
+        return route_P
+
+    def _duo_transfer_origin(s, node, t_index, supplies, P):
+        """Origin node transfer for DUO with a FIFO vertical queue.
+
+        The queue is represented by per-destination cumulative demand curves N_dem^s and the per-destination cumulative departure curves N_out^s.
+        The destination composition of departing vehicles follows FIFO: N_out^s(T+1) = N_dem^s(tau) with N_dem(tau) = N_out(T+1).
+        Sets the aggregate ``inflow_rate`` of the outlinks and adds their per-destination inflows to ``s._duo_all_ifd``.
 
         Parameters
         ----------
         node : Node
+            Origin node.
         t_index : int
-        demands, supplies : dict
-        tree_arr : np.ndarray (n_dests, n_nodes) int32
+            Current timestep index.
+        supplies : dict[Link, float]
+            Supply S_l for each link.
+        P : np.ndarray, shape (n_dests, n_out)
+            Routing matrix of this node from ``_duo_route_matrices``.
         """
         dt = s.DELTAT
         t = t_index * dt
+        T = t_index
+        T1 = T + 1
+        cum_dem = s._duo_orig_cum_dem[node.name]
+        cum_dem_agg = s._duo_orig_cum_dem_agg[node.name]
+        cum_out = s._duo_orig_cum_out[node.name]
+        oids = s._duo_node_outlink_ids[s._duo_node_idx[node.name]]
 
-        orig_dests = s._duo_orig_demands.get(node.name, {})
-        total_demand = 0.0
-        for dest, entries in orig_dests.items():
-            for t_start, t_end_d, flow in entries:
-                if t_start <= t < t_end_d:
-                    total_demand += flow
+        # Demand arriving during [T, T+1)
+        rate = np.zeros(cum_dem.shape[0])
+        for (t_start, t_end_d), darr in s._duo_demand_windows.get(node.name, []):
+            if t_start <= t < t_end_d:
+                rate += darr
+        cum_dem[:, T1] = cum_dem[:, T] + dt * rate
+        cum_dem_agg[T1] = cum_dem_agg[T] + dt * rate.sum()
 
-        effective_demand = total_demand + node.demand_queue / dt
+        # Sending cohort: queued vehicles plus the demand of this step, routed to outlinks
+        send_d = np.maximum(cum_dem[:, T1] - cum_out[:, T], 0.0)
+        out_demand = (send_d @ P) / dt  # (n_out,) veh/s
+        total_demand = out_demand.sum()
 
-        if len(node.outlinks) == 1:
-            outlink = list(node.outlinks.values())[0]
-            supply = supplies[outlink]
-            flow = min(effective_demand, supply)
-            if node.flow_capacity is not None:
-                flow = min(flow, node.flow_capacity)
-            flow = max(flow, 0)
-            outlink.inflow_rate = flow
+        # Diverge rule: all outlink demands are scaled by the most restrictive supply ratio
+        if total_demand > 1e-15:
+            min_ratio = min(1.0, node.flow_capacity / total_demand)
+            for j, li in enumerate(oids):
+                if out_demand[j] > 1e-15:
+                    min_ratio = min(min_ratio, supplies[s.LINKS[li]] / out_demand[j])
+            min_ratio = max(min_ratio, 0.0)
         else:
-            dest_flow = {}
-            for dest, entries in orig_dests.items():
-                for t_start, t_end_d, fl in entries:
-                    if t_start <= t < t_end_d:
-                        dest_flow[dest] = dest_flow.get(dest, 0.0) + fl
+            min_ratio = 0.0
+        flow = total_demand * min_ratio
+        for j, li in enumerate(oids):
+            s.LINKS[li].inflow_rate = out_demand[j] * min_ratio
 
-            total_q = sum(dest_flow.values()) + node.demand_queue / dt
-            if total_q < 1e-15:
-                for outlink in node.outlinks.values():
-                    outlink.inflow_rate = 0.0
-                node.demand_queue_history.append(node.demand_queue)
-                return
+        # Departure from the vertical queue: FIFO (strict) or proportional to the queued composition (coarse)
+        N_out_new = cum_out[:, T].sum() + flow * dt
+        if s.NODE_FIFO == "strict":
+            cum_out_new = _fifo_lookup(cum_dem_agg, cum_dem, N_out_new, T1)
+        else:
+            send_total = send_d.sum()
+            cum_out_new = cum_out[:, T] + (flow * dt * send_d / send_total if send_total > 1e-15 else 0.0)
+        out_d = (cum_out_new - cum_out[:, T]) / dt
+        cum_out[:, T1] = cum_out_new
+        s._duo_all_ifd[oids] += P.T * out_d[None, :]
 
-            ni = s._duo_node_idx[node.name]
-            oidx_set = s._duo_node_outlink_idxs[ni]
-            outlink_demand = defaultdict(float)
-            for dest, q in dest_flow.items():
-                di = s._duo_dest_to_idx.get(dest)
-                if di is not None:
-                    li = tree_arr[di, ni]
-                    if li >= 0 and li in oidx_set:
-                        outlink_demand[s.LINKS[li].name] += q
-            if node.demand_queue > 0:
-                denom = max(sum(dest_flow.values()), 1e-15)
-                q_per_dt = node.demand_queue / dt
-                for outlink_name in outlink_demand:
-                    outlink_demand[outlink_name] += (
-                        outlink_demand[outlink_name] / denom * q_per_dt)
-
-            min_ratio = 1.0
-            for outlink_name, od_q in outlink_demand.items():
-                if od_q > 1e-15:
-                    ratio = supplies[node.outlinks[outlink_name]] / od_q
-                    if ratio < min_ratio:
-                        min_ratio = ratio
-            if node.flow_capacity is not None:
-                total_out = sum(outlink_demand.values())
-                if total_out > 1e-15:
-                    r = node.flow_capacity / total_out
-                    if r < min_ratio:
-                        min_ratio = r
-            if min_ratio < 0:
-                min_ratio = 0.0
-            elif min_ratio > 1.0:
-                min_ratio = 1.0
-
-            actual_total = 0.0
-            for outlink_name in node.outlinks:
-                outlink = node.outlinks[outlink_name]
-                outlink.inflow_rate = outlink_demand.get(outlink_name, 0.0) * min_ratio
-                actual_total += outlink.inflow_rate
-
-            flow = actual_total
-
-        node.demand_queue += (total_demand - flow) * dt
-        node.demand_queue = max(0.0, node.demand_queue)
+        node.demand_queue = max(cum_dem_agg[T1] - N_out_new, 0.0)
         node.demand_queue_history.append(node.demand_queue)
 
     def __repr__(s):

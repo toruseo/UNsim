@@ -593,8 +593,13 @@ def test_manual_vs_auto_diverge():
 # INM (Incremental Node Model) - Floetteroed & Rohde (2011)
 # ================================================================
 
-def _build_flotterod(W, sw_capacity=None):
-    """Build Floetteroed 3x3 intersection scenario."""
+def _build_flotterod(W, sw_capacity=1400/3600):
+    """Build the Floetteroed & Rohde (2011) Section 2.4 test network (Fig. 3).
+
+    Turning fractions b_SN = b_SW = 0.5, b_EW = 1, b_NW = b_NS = 0.5; priorities
+    a_N = 10, a_S = 1, a_E = 0.1; downstream supplies R_N = R_S = 1400 veh/h and
+    R_W = ``sw_capacity`` (1400 veh/h in Table 1, 400 veh/h in Table 2).
+    """
     W.addNode("O_S", 0, 0); W.addNode("O_E", 2, 0); W.addNode("O_N", 1, 2)
     W.addNode("intersection", 1, 1, turning_fractions={
         "P_S": {"S_N": 0.5, "S_W": 0.5},
@@ -609,12 +614,11 @@ def _build_flotterod(W, sw_capacity=None):
     W.addLink("P_N", "O_N", "intersection", length=1000, free_flow_speed=20,
               backward_wave_speed=5, jam_density=0.2, merge_priority=10.0)
     W.addLink("S_N", "intersection", "D_N", length=1000, free_flow_speed=20,
-              backward_wave_speed=5, jam_density=0.2)
-    kw = {"capacity": sw_capacity} if sw_capacity else {"jam_density": 0.2}
+              backward_wave_speed=5, capacity=1400/3600)
     W.addLink("S_W", "intersection", "D_W", length=1000, free_flow_speed=20,
-              backward_wave_speed=5, **kw)
+              backward_wave_speed=5, capacity=sw_capacity)
     W.addLink("S_S", "intersection", "D_S", length=1000, free_flow_speed=20,
-              backward_wave_speed=5, jam_density=0.2)
+              backward_wave_speed=5, capacity=1400/3600)
 
 
 def test_inm_uncongested():
@@ -642,8 +646,11 @@ def test_inm_congested():
     W.adddemand("O_E", "D_W", 0, 2000, 100/3600)
     W.adddemand("O_N", "D_S", 0, 2000, 600/3600)
     W.exec_simulation()
-    assert equal_tolerance(_avg_outflow(W.get_link("P_N"), 500, 2000), 600/3600)
+    # Paper Table 2: q_S = 166.67, q_E = 16.67, q_N = 600, q_N^out = 83.34, q_W^out = 400, q_S^out = 300 veh/h
     assert equal_tolerance(_avg_outflow(W.get_link("P_S"), 500, 2000), 166.67/3600, rel_tol=0.15)
+    assert equal_tolerance(_avg_outflow(W.get_link("P_E"), 500, 2000), 16.67/3600)
+    assert equal_tolerance(_avg_outflow(W.get_link("P_N"), 500, 2000), 600/3600)
+    assert equal_tolerance(_avg_inflow(W.get_link("S_N"), 500, 2000), 83.34/3600)
     assert equal_tolerance(_avg_inflow(W.get_link("S_W"), 500, 2000), 400/3600)
     assert equal_tolerance(_avg_inflow(W.get_link("S_S"), 500, 2000), 300/3600)
 

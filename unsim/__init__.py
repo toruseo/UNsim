@@ -2,5 +2,5 @@ from .unsim import *
 from .analyzer import *
 from .utils import *
 
-__version__ = "0.13.1"
+__version__ = "0.16.0"
 __author__ = "Toru Seo"

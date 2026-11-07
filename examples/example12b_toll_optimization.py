@@ -14,6 +14,8 @@ Environment variables:
   LR          : learning rate (default 1.0)
   REG_LAMBDA  : L2 regularization coefficient (default 0.001)
   TEMPERATURE : logit temperature (default 60)
+  NODE_FIFO   : per-destination node allocation, "strict" (default) or "coarse"
+  OUT_SUFFIX  : suffix of the result file results/toll_optimized{OUT_SUFFIX}.npz (default "")
 """
 import sys, os, time
 import numpy as np
@@ -52,6 +54,8 @@ W = g["W"]
 # Override route choice to duo_logit
 W.ROUTE_CHOICE = "duo_logit"
 W.LOGIT_TEMPERATURE = TEMPERATURE
+NODE_FIFO = os.environ.get("NODE_FIFO", "strict")
+W.NODE_FIFO = NODE_FIFO
 
 # 3-period demand
 original_demands = list(W.demand_info)
@@ -268,7 +272,7 @@ outdir = os.path.join(os.path.dirname(__file__), "..", "results")
 os.makedirs(outdir, exist_ok=True)
 
 # Save full toll array (n_links, n_toll_steps) and metadata
-save_path = os.path.join(outdir, "toll_optimized.npz")
+save_path = os.path.join(outdir, "toll_optimized" + os.environ.get("OUT_SUFFIX", "") + ".npz")
 np.savez(save_path,
          toll_full=np.asarray(toll_opt),          # (n_links, n_toll_steps)
          toll_congested=np.asarray(theta_opt),     # (n_congested * n_toll_steps,)

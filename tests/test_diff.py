@@ -692,8 +692,9 @@ class TestGradient:
         """Base allocation tie-point under congestion (D_0 == alpha_0 * S).
 
         Setting: D = [0.25, 0.75, 0.75], S = 1.0, p = [1, 1, 2] (alpha = [0.25, 0.25, 0.50]).
-        Link 0 demand reaches capacity exactly (D_0 == 0.25 == alpha_0 * S).
-        Under congestion, dq_in_0 / dD_0 must be 0.0.
+        Link 0 demand reaches its share exactly (D_0 == 0.25 == alpha_0 * S).
+        The one-sided derivatives dq_in_0 / dD_0 are 0 (D_0 increased) and 1 (D_0 decreased).
+        At the tie the derivative follows the inlink's own demand (tie convention of unsim_diff), so it is 1.0.
         """
         D = jnp.array([0.25, 0.75, 0.75])
         p = jnp.array([1.0, 1.0, 2.0])
@@ -707,16 +708,17 @@ class TestGradient:
         assert jnp.allclose(dQ_dD, dQin_dD, atol=1e-4)
 
         dqi_dD = jax.jacobian(lambda d: _simulate_minimal_merge(_factory_minimal_merge(3), d, p, S, return_linkwise=True))(D)
-        assert jnp.isclose(float(dqi_dD[0, 0]), 0.0, atol=1e-4), \
-            f"Base allocation tie-point link 0 sensitivity distorted! Expected 0.0, got {dqi_dD[0, 0]}"
+        assert jnp.isclose(float(dqi_dD[0, 0]), 1.0, atol=1e-4), \
+            f"Base allocation tie-point link 0 sensitivity distorted! Expected 1.0, got {dqi_dD[0, 0]}"
 
     def test_grad_merge_3inlinks_surplus_exhaustion_boundary(self):
         """Surplus exhaustion boundary where residual supply exactly depletes at a link.
 
         Setting: D = [0.1, 0.7, 0.8], S = 1.2, p = [1, 1, 1] (alpha_i * S = 0.4).
         Link 0 surplus = 0.3. Link 1 capacity cap_1 = 0.7 - 0.4 = 0.3 == rem_S.
-        Link 1 consumes all remaining surplus; any further increase in D_1 cannot increase flow.
-        Thus dq_in_1 / dD_1 must be 0.0.
+        Link 1 consumes all remaining surplus; any further increase in D_1 cannot increase flow, while a decrease of D_1 decreases it.
+        The one-sided derivatives dq_in_1 / dD_1 are 0 (D_1 increased) and 1 (D_1 decreased).
+        At the tie the derivative follows the inlink's own surplus (tie convention of unsim_diff), so it is 1.0.
         """
         D = jnp.array([0.1, 0.7, 0.8])
         p = jnp.array([1.0, 1.0, 1.0])
@@ -735,8 +737,8 @@ class TestGradient:
         assert jnp.allclose(dQ_dD, dQin_dD, atol=1e-4)
 
         dqi_dD = jax.jacobian(lambda d: _simulate_minimal_merge(_factory_minimal_merge(3), d, p, S, return_linkwise=True))(D)
-        assert jnp.isclose(float(dqi_dD[1, 1]), 0.0, atol=1e-4), \
-            f"Surplus exhaustion link 1 sensitivity distorted! Expected 0.0, got {dqi_dD[1, 1]}"
+        assert jnp.isclose(float(dqi_dD[1, 1]), 1.0, atol=1e-4), \
+            f"Surplus exhaustion link 1 sensitivity distorted! Expected 1.0, got {dqi_dD[1, 1]}"
 
     def test_grad_merge_3inlinks_priority_zero_degeneracy(self):
         """Priority degeneracy (alpha_0 == 0 and sum(p) == 0).
@@ -788,8 +790,12 @@ class TestGradient:
 class TestINM:
     """Verify JAX INM matches Python INM and supports gradients."""
 
-    def _build_flotterod(self, sw_capacity=None):
-        """Build Floetteroed 3x3 intersection scenario."""
+    def _build_flotterod(self, sw_capacity=1400/3600):
+        """Build the Floetteroed & Rohde (2011) Section 2.4 test network.
+
+        Downstream supplies R_N = R_S = 1400 veh/h, R_W = ``sw_capacity``
+        (1400 veh/h in Table 1, 400 veh/h in Table 2).
+        """
         W = World(name="", deltat=5, tmax=3000, print_mode=0)
         W.addNode("O_S", 0, 0)
         W.addNode("O_E", 2, 0)
@@ -810,22 +816,29 @@ class TestINM:
         W.addLink("P_N", "O_N", "intersection", length=1000,
                   free_flow_speed=20, backward_wave_speed=5, jam_density=0.2, merge_priority=10.0)
         W.addLink("S_N", "intersection", "D_N", length=1000,
-                  free_flow_speed=20, backward_wave_speed=5, jam_density=0.2)
-        if sw_capacity is not None:
-            W.addLink("S_W", "intersection", "D_W", length=1000,
-                      free_flow_speed=20, backward_wave_speed=5, capacity=sw_capacity)
-        else:
-            W.addLink("S_W", "intersection", "D_W", length=1000,
-                      free_flow_speed=20, backward_wave_speed=5, jam_density=0.2)
+                  free_flow_speed=20, backward_wave_speed=5, capacity=1400/3600)
+        W.addLink("S_W", "intersection", "D_W", length=1000,
+                  free_flow_speed=20, backward_wave_speed=5, capacity=sw_capacity)
         W.addLink("S_S", "intersection", "D_S", length=1000,
-                  free_flow_speed=20, backward_wave_speed=5, jam_density=0.2)
+                  free_flow_speed=20, backward_wave_speed=5, capacity=1400/3600)
         W.adddemand("O_S", "D_N", 0, 2000, 600/3600)
         W.adddemand("O_E", "D_W", 0, 2000, 100/3600)
         W.adddemand("O_N", "D_S", 0, 2000, 600/3600)
         return W
 
+    @staticmethod
+    def _jax_avg_rate(state, W, name, t1, t2):
+        """Average flow rate (veh/s) of link ``name`` over [t1, t2] s from the JAX state.
+
+        Outflow (cum_departure) for the upstream links P_*, inflow (cum_arrival) for the downstream links S_*.
+        """
+        i = [l.name for l in W.LINKS].index(name)
+        cum = state.cum_departure[i] if name.startswith("P") else state.cum_arrival[i]
+        i1, i2 = int(t1 / W.DELTAT), int(t2 / W.DELTAT)
+        return float(cum[i2] - cum[i1]) / ((i2 - i1) * W.DELTAT)
+
     def test_inm_uncongested(self):
-        """JAX INM matches Python for Floetteroed Table 1 (uncongested)."""
+        """JAX INM reproduces Floetteroed Table 1 (uncongested) and matches Python."""
         W = self._build_flotterod()
         W.exec_simulation()
         W.analyzer.basic_analysis()
@@ -836,9 +849,13 @@ class TestINM:
         ttt_orig = W.analyzer.total_travel_time
         ttt_jax = float(total_travel_time(state, config))
         assert equal_tolerance(ttt_jax, ttt_orig)
+        # Paper Table 1: q_S = 600, q_E = 100, q_N = 600, q_N^out = 300, q_W^out = 700, q_S^out = 300 veh/h
+        expected = {"P_S": 600, "P_E": 100, "P_N": 600, "S_N": 300, "S_W": 700, "S_S": 300}
+        for name, veh_per_h in expected.items():
+            assert equal_tolerance(self._jax_avg_rate(state, W, name, 200, 1500), veh_per_h/3600)
 
     def test_inm_congested(self):
-        """JAX INM matches Python for Floetteroed Table 2 (congested)."""
+        """JAX INM reproduces Floetteroed Table 2 (congested, R_W = 400 veh/h) and matches Python."""
         W = self._build_flotterod(sw_capacity=400/3600)
         W.exec_simulation()
         W.analyzer.basic_analysis()
@@ -849,6 +866,11 @@ class TestINM:
         ttt_orig = W.analyzer.total_travel_time
         ttt_jax = float(total_travel_time(state, config))
         assert equal_tolerance(ttt_jax, ttt_orig)
+        # Paper Table 2: q_S = 166.67, q_E = 16.67, q_N = 600, q_N^out = 83.34, q_W^out = 400, q_S^out = 300 veh/h
+        assert equal_tolerance(self._jax_avg_rate(state, W, "P_S", 500, 2000), 166.67/3600, rel_tol=0.15)
+        expected = {"P_E": 16.67, "P_N": 600, "S_N": 83.34, "S_W": 400, "S_S": 300}
+        for name, veh_per_h in expected.items():
+            assert equal_tolerance(self._jax_avg_rate(state, W, name, 500, 2000), veh_per_h/3600)
 
     def test_inm_grad_turning_fractions(self):
         """Gradient of TTT w.r.t. turning fractions is finite."""
@@ -1066,11 +1088,10 @@ class TestTravelTime:
         """link_exit_time gradient with frozen state (no simulate gradient).
 
         1 link free flow, t_enter=10. t_freeflow = t_queue = 60 (tie).
-        jnp.maximum(a,b) = 0.5*(a+b+|a-b|), so at tie d/da = d/db = 0.5.
-        With frozen state: d(t_queue)/d(u) = 0 (stop_gradient).
+        At the tie the derivative follows the free-flow branch (tie convention of unsim_diff, see "Derivatives at ties").
+        With frozen state: d(t_queue)/d(u) = 0 (stop_gradient), so the one-sided derivatives are -d/u^2 (u decreased) and 0 (u increased).
 
-        Theory: 0.5 * d(t_freeflow)/d(u) + 0.5 * 0
-              = 0.5 * (-d/u^2) = 0.5 * (-2.5) = -1.25
+        Theory: d(t_freeflow)/d(u) = -d/u^2 = -2.5
         """
         W = World(name="", deltat=5, tmax=2000, print_mode=0)
         W.addNode("orig", 0, 0)
@@ -1090,7 +1111,7 @@ class TestTravelTime:
 
         grads = jax.grad(loss_direct)(params)
         ad_grad = float(grads.u[0])
-        expected = 0.5 * (-1000.0 / 20.0 ** 2)  # -1.25
+        expected = -1000.0 / 20.0 ** 2  # -2.5
         assert abs(ad_grad - expected) < 0.1, \
             f"AD={ad_grad:.4f}, theory={expected:.4f}"
 
@@ -1167,8 +1188,116 @@ def _build_merge_regression():
     return W
 
 
+def _build_merge_np(u=(20.0, 20.0, 20.0), mp1=1.0, extra=(0.0, 0.0), q=(0.45, 0.6), **world_kw):
+    """Python World of the merge regression scenario with perturbable parameters.
+
+    q* = 0.8 and kappa = 0.2 are fixed when u changes (w derived), as in the JAX parameterization.
+
+    Parameters
+    ----------
+    u : tuple of float
+        Free-flow speeds of link1, link2, link3.
+    mp1 : float
+        Merge priority of link1.
+    extra : tuple of float
+        Additional demand rate of orig1 and orig2 over the whole horizon (the all-timestep direction).
+    q : tuple of float
+        Demand rates of orig1 (t in [0, 1000)) and orig2 (t in [400, 1000)).
+    **world_kw
+        Further World arguments (e.g. route_choice, node_fifo).
+
+    Returns
+    -------
+    World
+    """
+    q_star, kappa = 0.8, 0.2
+    W = World(name="", deltat=5, tmax=2000, print_mode=0, **world_kw)
+    W.addNode("orig1", 0, 0); W.addNode("orig2", 0, 2)
+    W.addNode("merge", 1, 1); W.addNode("dest", 2, 1)
+    for (name, a, b, mp), ui in zip((("link1", "orig1", "merge", mp1), ("link2", "orig2", "merge", 1.0),
+                                     ("link3", "merge", "dest", 1.0)), u):
+        W.addLink(name, a, b, length=1000, free_flow_speed=ui, backward_wave_speed=q_star / (kappa - q_star / ui),
+                  capacity=q_star, merge_priority=mp)
+    W.adddemand("orig1", "dest", 0, 1000, q[0])
+    W.adddemand("orig2", "dest", 400, 1000, q[1])
+    for i, e in enumerate(extra):
+        if e != 0.0:
+            W.adddemand(f"orig{i + 1}", "dest", 0, 2000, e)
+    return W
+
+
+def _merge_np_objectives(W):
+    """[TTT, TTT of link1..3, TT(orig1 -> dest, t=100), TT(orig2 -> dest, t=500)] of the float64 Python model.
+
+    Travel times use the conventions of link_exit_time (linear interpolation, searchsorted side='right').
+    """
+    W.exec_simulation()
+    dt, tsize = W.DELTAT, W.TSIZE
+    ca = [np.asarray(l.cum_arrival, dtype=np.float64) for l in W.LINKS]
+    cd = [np.asarray(l.cum_departure, dtype=np.float64) for l in W.LINKS]
+    link_ttt = [float(np.sum(ca[i][:tsize] - cd[i][:tsize])) * dt for i in range(3)]
+    ttt = sum(link_ttt) + sum(float(np.sum(np.asarray(n.demand_queue_history[:tsize], dtype=np.float64)))
+                              for n in W.NODES) * dt
+
+    def interp(a, fi):
+        fi = min(max(fi, 0.0), len(a) - 1.0)
+        i = min(int(np.floor(fi)), len(a) - 2)
+        return a[i] * (1.0 - (fi - i)) + a[i + 1] * (fi - i)
+
+    def invert(a, v):
+        idx = min(max(int(np.searchsorted(a, v, side="right")), 1), len(a) - 1)
+        frac = min(max((v - a[idx - 1]) / max(a[idx] - a[idx - 1], 1e-10), 0.0), 1.0)
+        return min(max(idx - 1 + frac, 0.0), len(a) - 1.0)
+
+    def path_tt(path, t0):
+        t = t0
+        for i in path:
+            t = max(t + W.LINKS[i].length / W.LINKS[i].u, invert(cd[i], interp(ca[i], t / dt)) * dt)
+        return t - t0
+
+    return np.array([ttt] + link_ttt + [path_tt((0, 2), 100.0), path_tt((1, 2), 500.0)])
+
+
+_ONE_SIDED_EPS = 1e-6
+_ONE_SIDED_CACHE = {}
+
+
+def _merge_one_sided(name):
+    """Forward and backward float64 differences of _merge_np_objectives for one parameter direction."""
+    if name not in _ONE_SIDED_CACHE:
+        e = _ONE_SIDED_EPS
+        if name.startswith("demand"):
+            k = int(name[-1]) - 1
+            kw = lambda s: dict(extra=tuple(s * e if i == k else 0.0 for i in range(2)))
+        elif name.startswith("q"):
+            k = int(name[-1]) - 1
+            kw = lambda s: dict(q=tuple(q0 + (s * e if i == k else 0.0) for i, q0 in enumerate((0.45, 0.6))))
+        elif name.startswith("u"):
+            k = int(name[-1]) - 1
+            kw = lambda s: dict(u=tuple(20.0 + (s * e if i == k else 0.0) for i in range(3)))
+        else:
+            kw = lambda s: dict(mp1=1.0 + s * e)
+        f0 = _merge_np_objectives(_build_merge_np())
+        fp = _merge_np_objectives(_build_merge_np(**kw(1.0)))
+        fm = _merge_np_objectives(_build_merge_np(**kw(-1.0)))
+        _ONE_SIDED_CACHE[name] = ((fp - f0) / e, (f0 - fm) / e)
+    return _ONE_SIDED_CACHE[name]
+
+
+def _check_one_sided(actual, d_plus, d_minus, label=""):
+    """Assert that actual lies between the one-sided derivatives (tolerance 1e-4 relative + 1e-2)."""
+    lo, hi = min(d_plus, d_minus), max(d_plus, d_minus)
+    tol = 1e-4 * max(abs(d_plus), abs(d_minus)) + 1e-2
+    assert lo - tol <= actual <= hi + tol, (
+        f"{label}: AD={actual:.6f} outside [{lo:.6f}, {hi:.6f}] (D+={d_plus:.6f}, D-={d_minus:.6f})")
+
+
 class TestMergeAD:
-    """AD gradient regression for merge scenario."""
+    """AD of the merge scenario lies between the one-sided derivatives of the float64 Python model.
+
+    The scenario has exact ties (integer free-flow steps, equal merge priorities, queues that clear at step boundaries), where several quantities are not differentiable.
+    The reference is the interval between the forward and backward differences (eps = 1e-6) of the float64 Python simulator.
+    """
 
     @pytest.fixture(autouse=True, scope="class")
     def setup(self, request):
@@ -1182,63 +1311,59 @@ class TestMergeAD:
         p, c = self.params, self.config
         grad = jax.grad(lambda dr: total_travel_time(
             simulate(p._replace(demand_rate=dr), c), c))(p.demand_rate)
-        _check_reg(float(jnp.sum(grad[0])), 437453.62, "demand_orig1")
+        dp, dm = _merge_one_sided("demand1")
+        _check_one_sided(float(jnp.sum(grad[0])), dp[0], dm[0], "demand_orig1")
 
     def test_ad_demand_orig2(self):
         p, c = self.params, self.config
         grad = jax.grad(lambda dr: total_travel_time(
             simulate(p._replace(demand_rate=dr), c), c))(p.demand_rate)
-        _check_reg(float(jnp.sum(grad[1])), 421502.56, "demand_orig2")
+        dp, dm = _merge_one_sided("demand2")
+        _check_one_sided(float(jnp.sum(grad[1])), dp[0], dm[0], "demand_orig2")
 
-    def test_ad_speed_link1(self):
+    @pytest.mark.parametrize("k", [0, 1, 2])
+    def test_ad_speed(self, k):
         p, c = self.params, self.config
         grad = jax.grad(lambda u: total_travel_time(
             simulate(p._replace(u=u), c), c))(p.u)
-        _check_reg(float(grad[0]), -1278.28, "speed_link1")
+        dp, dm = _merge_one_sided(f"u{k + 1}")
+        _check_one_sided(float(grad[k]), dp[0], dm[0], f"speed_link{k + 1}")
 
-    def test_ad_speed_link2(self):
-        p, c = self.params, self.config
-        grad = jax.grad(lambda u: total_travel_time(
-            simulate(p._replace(u=u), c), c))(p.u)
-        _check_reg(float(grad[1]), -616.88, "speed_link2")
-
-    def test_ad_speed_link3(self):
-        p, c = self.params, self.config
-        grad = jax.grad(lambda u: total_travel_time(
-            simulate(p._replace(u=u), c), c))(p.u)
-        _check_reg(float(grad[2]), -2024.69, "speed_link3")
-
-    def test_ad_linkTTT_link1(self):
+    @pytest.mark.parametrize("k", [0, 1, 2])
+    def test_ad_linkTTT(self, k):
         p, c, mp1 = self.params, self.config, self.mp1_base
         def fn(m):
             s = simulate(p._replace(
                 merge_priority=p.merge_priority.at[0].set(m)), c)
             n = s.cum_arrival[:, :c.tsize] - s.cum_departure[:, :c.tsize]
             return jnp.sum(n, axis=1) * c.deltat
-        _check_reg(float(jax.jacfwd(fn)(mp1)[0]), -45900.04, "linkTTT_link1")
+        dp, dm = _merge_one_sided("mp1")
+        _check_one_sided(float(jax.jacfwd(fn)(mp1)[k]), dp[1 + k], dm[1 + k], f"linkTTT_link{k + 1}")
 
-    def test_ad_linkTTT_link2(self):
+    def test_ad_ttt_merge_priority_invariant(self):
+        """TTT does not depend on the merge priority here (the merge discharges at capacity either way)."""
         p, c, mp1 = self.params, self.config, self.mp1_base
         def fn(m):
-            s = simulate(p._replace(
-                merge_priority=p.merge_priority.at[0].set(m)), c)
-            n = s.cum_arrival[:, :c.tsize] - s.cum_departure[:, :c.tsize]
-            return jnp.sum(n, axis=1) * c.deltat
-        _check_reg(float(jax.jacfwd(fn)(mp1)[1]), 40725.04, "linkTTT_link2")
+            return total_travel_time(simulate(p._replace(merge_priority=p.merge_priority.at[0].set(m)), c), c)
+        dp, dm = _merge_one_sided("mp1")
+        assert abs(dp[0]) < 1e-2 and abs(dm[0]) < 1e-2
+        _check_one_sided(float(jax.grad(fn)(mp1)), dp[0], dm[0], "ttt_mp1")
 
     def test_ad_odTT_orig1_t100(self):
         p, c, mp1 = self.params, self.config, self.mp1_base
         def fn(m):
             pp = p._replace(merge_priority=p.merge_priority.at[0].set(m))
             return travel_time_auto(0, 3, 100.0, simulate(pp, c), pp, c)
-        _check_reg(float(jax.grad(fn)(mp1)), 0.0, "odTT_orig1_t100")
+        dp, dm = _merge_one_sided("mp1")
+        _check_one_sided(float(jax.grad(fn)(mp1)), dp[4], dm[4], "odTT_orig1_t100")
 
     def test_ad_odTT_orig2_t500(self):
         p, c, mp1 = self.params, self.config, self.mp1_base
         def fn(m):
             pp = p._replace(merge_priority=p.merge_priority.at[0].set(m))
             return travel_time_auto(1, 3, 500.0, simulate(pp, c), pp, c)
-        _check_reg(float(jax.grad(fn)(mp1)), 75.0, "odTT_orig2_t500")
+        dp, dm = _merge_one_sided("mp1")
+        _check_one_sided(float(jax.grad(fn)(mp1)), dp[5], dm[5], "odTT_orig2_t500")
 
 
 class TestMergeFD:
@@ -1275,6 +1400,134 @@ class TestMergeFD:
             pp = p._replace(merge_priority=p.merge_priority.at[0].set(mp1+d))
             return float(travel_time_auto(1, 3, 500.0, simulate(pp, c), pp, c))
         _check_reg(self._fd(fn), 75.04, "fd_odTT_orig2_t500")
+
+
+class TestTieConvention:
+    """Derivatives at ties follow one convention (see "Derivatives at ties" in unsim_diff)."""
+
+    def test_tie_helpers(self):
+        """Values equal min/max exactly; at a tie (also within the relative tolerance) the derivative is that of the first operand."""
+        from unsim.unsim_diff import _tie_min, _tie_max, _nonneg
+        cases = [(0.3, 0.5), (0.5, 0.3), (0.4, 0.4), (0.4, float(np.float32(0.4) * np.float32(1 - 1e-6)))]
+        for x, y in cases:
+            x32, y32 = jnp.float32(x), jnp.float32(y)
+            assert float(_tie_min(x32, y32)) == float(jnp.minimum(x32, y32))
+            assert float(_tie_max(x32, y32)) == float(jnp.maximum(x32, y32))
+        g_min = lambda x, y: jax.grad(lambda a, b: _tie_min(a, b), argnums=(0, 1))(jnp.float32(x), jnp.float32(y))
+        g_max = lambda x, y: jax.grad(lambda a, b: _tie_max(a, b), argnums=(0, 1))(jnp.float32(x), jnp.float32(y))
+        assert [float(v) for v in g_min(0.3, 0.5)] == [1.0, 0.0]
+        assert [float(v) for v in g_min(0.5, 0.3)] == [0.0, 1.0]
+        assert [float(v) for v in g_min(0.4, 0.4)] == [1.0, 0.0]
+        assert [float(v) for v in g_min(0.4, cases[3][1])] == [1.0, 0.0]
+        assert [float(v) for v in g_max(0.4, 0.4)] == [1.0, 0.0]
+        assert [float(v) for v in g_max(0.3, 0.5)] == [0.0, 1.0]
+        for x in (0.0, -1e-9, 2.0):
+            assert float(_nonneg(jnp.float32(x))) == max(float(np.float32(x)), 0.0)
+            assert float(jax.grad(_nonneg)(jnp.float32(x))) == 1.0
+
+    @pytest.mark.parametrize("node_fifo", ["strict", "coarse"])
+    @pytest.mark.parametrize("param", ["q2", "mp1"])
+    def test_duo_merge_one_sided(self, node_fifo, param):
+        """DUO AD of TTT and link TTT lies between the one-sided derivatives of the float64 model.
+
+        The ties of this scenario include the end of orig2's vertical queue and FIFO lookups at grid values.
+        """
+        params, config = world_to_jax(_build_merge_np(route_choice="duo", node_fifo=node_fifo))
+
+        def f(x):
+            if param == "q2":  # orig2 -> dest, t in [400, 1000)
+                p = params._replace(od_demand_rate=params.od_demand_rate.at[1, 0, 80:200].add(x),
+                                    demand_rate=params.demand_rate.at[1, 80:200].add(x))
+            else:
+                p = params._replace(merge_priority=params.merge_priority.at[0].add(x))
+            s = simulate_duo(p, config)
+            n = s.cum_arrival[:, :config.tsize] - s.cum_departure[:, :config.tsize]
+            return jnp.concatenate([total_travel_time(s, config)[None], jnp.sum(n, axis=1) * config.deltat])
+
+        ad = np.asarray(jax.jacrev(f)(jnp.float32(0.0)))
+        dp, dm = _merge_one_sided(param)
+        for i, name in enumerate(["TTT", "TTT_link1", "TTT_link2", "TTT_link3"]):
+            _check_one_sided(float(ad[i]), dp[i], dm[i], f"{node_fifo} {param} {name}")
+
+    def test_cfl_limit_speed_gradient(self):
+        """At the CFL limit d = u * dt only the left derivative in u exists (a larger u violates the CFL condition); AD returns it."""
+        def build(u2):
+            q_star, kappa = 0.8, 0.2
+            W = World(name="", deltat=5, tmax=1500, print_mode=0)
+            W.addNode("o", 0, 0); W.addNode("m", 1, 0); W.addNode("d", 2, 0)
+            for name, a, b, length, u in (("l1", "o", "m", 1000, 20.0), ("l2", "m", "d", 100, u2)):
+                W.addLink(name, a, b, length=length, free_flow_speed=u, backward_wave_speed=q_star / (kappa - q_star / u),
+                          capacity=q_star)
+            W.adddemand("o", "d", 0, 600, 0.5)
+            return W
+
+        def ttt_np(W):
+            W.exec_simulation()
+            v = sum(float(np.sum(np.asarray(l.cum_arrival[:W.TSIZE]) - np.asarray(l.cum_departure[:W.TSIZE]))) for l in W.LINKS)
+            v += sum(float(np.sum(np.asarray(n.demand_queue_history[:W.TSIZE]))) for n in W.NODES)
+            return v * W.DELTAT
+
+        eps = 1e-6
+        d_minus = (ttt_np(build(20.0)) - ttt_np(build(20.0 - eps))) / eps
+        params, config = world_to_jax(build(20.0))
+        g = jax.grad(lambda u: total_travel_time(simulate(params._replace(u=u), config), config))(params.u)
+        assert abs(float(g[1]) - d_minus) <= 1e-3 * abs(d_minus) + 1e-2, f"AD={float(g[1])}, left derivative={d_minus}"
+
+    @pytest.mark.parametrize("param", ["q1", "q2", "alpha1"])
+    def test_inm_simultaneous_saturation_one_sided(self, param):
+        """INM general node: inlinks that reach their demand in the same iteration keep their own derivatives.
+
+        Both inlinks of the 2x2 general node carry 0.4 veh/s with priorities 1 and 1 and reach their demand in the same INM iteration.
+        Sharing the averaged step derivative gave d TTT / d q2 = 1525375 and d TTT / d alpha1 = 49600, outside the one-sided derivatives ([776437, 782312] and 0).
+        At t = 995, 1095 and 1295 s an inlink demand and an outlink supply also bind in the same iteration; d TTT / d q1 was 1556875, outside [930937, 1158562].
+        """
+        def build(dq1=0.0, dq2=0.0, dmp1=0.0):
+            q_star, kappa = 0.8, 0.2
+            W = World(name="", deltat=5, tmax=3000, print_mode=0)
+            W.addNode("orig1", 0, 0); W.addNode("orig2", 0, 2)
+            W.addNode("gen", 1, 1, turning_fractions={"l1": {"l3": 0.5, "l4": 0.5}, "l2": {"l3": 0.5, "l4": 0.5}})
+            W.addNode("dest1", 2, 2); W.addNode("m4", 2, 0); W.addNode("dest2", 3, 0)
+            for name, a, b, qs, mp in (("l1", "orig1", "gen", q_star, 1.0 + dmp1), ("l2", "orig2", "gen", q_star, 1.0),
+                                       ("l3", "gen", "dest1", q_star, None), ("l4", "gen", "m4", q_star, None),
+                                       ("l5", "m4", "dest2", 0.2, None)):
+                kw = {} if mp is None else dict(merge_priority=mp)
+                W.addLink(name, a, b, length=1000, free_flow_speed=20, backward_wave_speed=qs / (kappa - qs / 20),
+                          capacity=qs, **kw)
+            W.adddemand("orig1", "dest1", 0, 1200, 0.4 + dq1)
+            W.adddemand("orig2", "dest1", 200, 1000, 0.4 + dq2)
+            return W
+
+        def objectives_np(W):
+            W.exec_simulation()
+            ts = W.TSIZE
+            link = [float(np.sum(np.asarray(l.cum_arrival[:ts], np.float64) - np.asarray(l.cum_departure[:ts], np.float64))) * W.DELTAT
+                    for l in W.LINKS]
+            queue = sum(float(np.sum(np.asarray(n.demand_queue_history[:ts], np.float64))) for n in W.NODES) * W.DELTAT
+            return np.array([sum(link) + queue] + link)
+
+        params, config = world_to_jax(build())
+
+        def f(x):
+            if param == "q1":  # orig1, t in [0, 1200)
+                p = params._replace(demand_rate=params.demand_rate.at[0, 0:240].add(x),
+                                    od_demand_rate=params.od_demand_rate.at[0, 0, 0:240].add(x))
+            elif param == "q2":  # orig2, t in [200, 1000)
+                p = params._replace(demand_rate=params.demand_rate.at[1, 40:200].add(x),
+                                    od_demand_rate=params.od_demand_rate.at[1, 0, 40:200].add(x))
+            else:
+                p = params._replace(merge_priority=params.merge_priority.at[0].add(x))
+            s = simulate(p, config)
+            n = s.cum_arrival[:, :config.tsize] - s.cum_departure[:, :config.tsize]
+            return jnp.concatenate([total_travel_time(s, config)[None], jnp.sum(n, axis=1) * config.deltat])
+
+        ad = np.asarray(jax.jacrev(f)(jnp.float32(0.0)))
+        eps = 1e-6
+        kw = lambda s: {{"q1": "dq1", "q2": "dq2", "alpha1": "dmp1"}[param]: s * eps}
+        f0 = objectives_np(build())
+        d_plus = (objectives_np(build(**kw(1.0))) - f0) / eps
+        d_minus = (f0 - objectives_np(build(**kw(-1.0)))) / eps
+        for i, name in enumerate(["TTT"] + [f"TTT_l{k}" for k in range(1, 6)]):
+            _check_one_sided(float(ad[i]), d_plus[i], d_minus[i], f"{param} {name}")
 
 
 def _build_duo_regression():
@@ -1317,21 +1570,21 @@ class TestDuoAD:
         g = float(jax.grad(lambda c: total_travel_time(
             simulate_duo(self._replace_cap(c), self.config),
             self.config))(self.cap0))
-        _check_reg(g, -586318.62, "ttt_all")
+        _check_reg(g, -642039.00, "ttt_all")
 
     def test_ad_odTT_t1500(self):
         def fn(c):
             p = self._replace_cap(c)
             return travel_time_auto(self.orig_id, self.dest_id,
                                     1500.0, simulate_duo(p, self.config), p, self.config)
-        _check_reg(float(jax.grad(fn)(self.cap0)), -570.35, "odTT_t1500")
+        _check_reg(float(jax.grad(fn)(self.cap0)), -358.59, "odTT_t1500")
 
     def test_ad_pathTT_fast_t1500(self):
         def fn(c):
             p = self._replace_cap(c)
             return travel_time(self.fast_path, 1500.0,
                                simulate_duo(p, self.config), p, self.config)
-        _check_reg(float(jax.grad(fn)(self.cap0)), -570.35, "pathTT_fast_t1500")
+        _check_reg(float(jax.grad(fn)(self.cap0)), -358.59, "pathTT_fast_t1500")
 
 
 class TestDuoFD:
@@ -1362,7 +1615,7 @@ class TestDuoFD:
         def fn(c):
             return float(total_travel_time(
                 simulate_duo(self._replace_cap(c), self.config), self.config))
-        _check_reg(self._fd(fn), -585710.94, "fd_ttt_all")
+        _check_reg(self._fd(fn), -638328.12, "fd_ttt_all")
 
     def test_fd_odTT_t1500(self):
         def fn(c):
@@ -1370,4 +1623,66 @@ class TestDuoFD:
             return float(travel_time_auto(
                 self.orig_id, self.dest_id, 1500.0,
                 simulate_duo(p, self.config), p, self.config))
-        _check_reg(self._fd(fn), -570.13, "fd_odTT_t1500")
+        _check_reg(self._fd(fn), -356.38, "fd_odTT_t1500")
+
+
+_FLOAT64_SCRIPT = r"""
+import sys
+import numpy as np
+sys.path.insert(0, sys.argv[1])
+import jax
+import jax.numpy as jnp
+import test_diff as td
+from unsim.unsim_diff import world_to_jax, simulate, simulate_duo, total_travel_time
+
+def counts(W):
+    T = W.TSIZE
+    return (np.array([l.cum_arrival[:T + 1] for l in W.LINKS]), np.array([l.cum_departure[:T + 1] for l in W.LINKS]))
+
+# Merge: forward agrees with the float64 Python model, AD lies between its one-sided derivatives
+p, c = world_to_jax(td._build_merge_np(), dtype="float64")
+s = simulate(p, c)
+assert p.u.dtype == jnp.float64 and s.cum_arrival.dtype == jnp.float64
+W = td._build_merge_np()
+W.exec_simulation()
+U, D = counts(W)
+err = max(np.max(np.abs(np.asarray(s.cum_arrival) - U)), np.max(np.abs(np.asarray(s.cum_departure) - D)))
+assert err < 1e-9, err
+g = jax.grad(lambda u: total_travel_time(simulate(p._replace(u=u), c), c))(p.u)
+for k in range(3):
+    dp, dm = td._merge_one_sided(f"u{k + 1}")
+    td._check_one_sided(float(g[k]), dp[0], dm[0], f"speed_link{k + 1}")
+
+# Logit DUO: forward agrees with the float64 Python model
+p, c = world_to_jax(td._build_duo_regression(), dtype="float64")
+s = simulate_duo(p, c)
+assert s.cum_arrival.dtype == jnp.float64
+W = td._build_duo_regression()
+W.exec_simulation()
+U, D = counts(W)
+err = max(np.max(np.abs(np.asarray(s.cum_arrival) - U)), np.max(np.abs(np.asarray(s.cum_departure) - D)))
+assert err < 1e-8, err
+
+# With x64 on, the default stays float32
+p, c = world_to_jax(td._build_merge_np())
+assert p.u.dtype == jnp.float32 and simulate(p, c).cum_arrival.dtype == jnp.float32
+print("OK")
+"""
+
+
+class TestFloat64:
+    """world_to_jax(dtype="float64") runs the simulation in float64.
+
+    float64 turns on jax_enable_x64 for the whole process, so the checks run in a subprocess.
+    """
+
+    def test_float64_subprocess(self):
+        import subprocess
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        env = dict(os.environ, PYTHONPATH=os.path.join(tests_dir, ".."))
+        r = subprocess.run([sys.executable, "-c", _FLOAT64_SCRIPT, tests_dir], capture_output=True, text=True, env=env)
+        assert r.returncode == 0 and r.stdout.strip().endswith("OK"), r.stdout + r.stderr
+
+    def test_invalid_dtype(self):
+        with pytest.raises(ValueError):
+            world_to_jax(_build_merge_regression(), dtype="float16")

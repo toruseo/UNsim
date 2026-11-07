@@ -26,7 +26,7 @@ from unsim import *
 # Scenario builders
 # ================================================================
 
-def _build_kuwahara(route_choice="duo", logit_temperature=60.0):
+def _build_kuwahara(route_choice="duo", logit_temperature=60.0, node_fifo="strict"):
     """Build the Kuwahara & Akamatsu (2001) Fig. 5 network.
 
     Parameters
@@ -35,8 +35,10 @@ def _build_kuwahara(route_choice="duo", logit_temperature=60.0):
         "duo" or "duo_logit".
     logit_temperature : float
         Temperature for duo_logit (ignored for duo).
+    node_fifo : str
+        "strict" or "coarse".
     """
-    kwargs = {"tmax": 5*3600, "print_mode": 0, "route_choice": route_choice}
+    kwargs = {"tmax": 5*3600, "print_mode": 0, "route_choice": route_choice, "node_fifo": node_fifo}
     if route_choice == "duo_logit":
         kwargs["logit_temperature"] = logit_temperature
     W = World(**kwargs)
@@ -63,10 +65,14 @@ def _build_kuwahara(route_choice="duo", logit_temperature=60.0):
                   backward_wave_speed=(L/lwp)*1000/3600,
                   capacity=fm/3600)
 
+    # Paper Fig. 5: q12 = 1000 (0 < t <= 1 h, 3 h < t), 2000 (1 < t <= 3 h);
+    #               q13 = 2000 (0 < t <= 1 h, 3 h < t), 4000 (1 < t <= 3 h) veh/h
     W.adddemand("1", "2", 0, 3600, 1000/3600)
     W.adddemand("1", "2", 3600, 10800, 2000/3600)
+    W.adddemand("1", "2", 10800, 5*3600, 1000/3600)
     W.adddemand("1", "3", 0, 3600, 2000/3600)
     W.adddemand("1", "3", 3600, 10800, 4000/3600)
+    W.adddemand("1", "3", 10800, 5*3600, 2000/3600)
     return W
 
 
@@ -178,6 +184,126 @@ class TestDUOLogit:
 
 
 # ================================================================
+# Multi-commodity FIFO tests (Python)
+# ================================================================
+
+def _build_time_separated(node_fifo="strict"):
+    """One link fed by two destinations in disjoint time windows, with a bottleneck on the first destination's outlink.
+
+    O -> M (in), M -> D1 (o1, capacity 0.1), M -> D2 (o2).
+    D1 vehicles enter during [0, 600), D2 vehicles during [600, 1200).
+    Under FIFO no D2 vehicle can leave link "in" before all 180 D1 vehicles have left.
+    """
+    W = World(tmax=4000, deltat=10, print_mode=0, route_choice="duo", node_fifo=node_fifo)
+    for n in ["O", "M", "D1", "D2"]:
+        W.addNode(n, 0, 0)
+    W.addLink("in", "O", "M", length=3000, free_flow_speed=10, backward_wave_speed=5, capacity=0.5)
+    W.addLink("o1", "M", "D1", length=1000, free_flow_speed=10, backward_wave_speed=5, capacity=0.1)
+    W.addLink("o2", "M", "D2", length=1000, free_flow_speed=10, backward_wave_speed=5, capacity=0.5)
+    W.adddemand("O", "D1", 0, 600, 0.3)
+    W.adddemand("O", "D2", 600, 1200, 0.3)
+    return W
+
+
+def _build_general_node():
+    """2-in 2-out node where each inlink carries a single destination.
+
+    O1 -> X (in1), O2 -> X (in2), X -> D1 (o1), X -> D2 (o2, capacity 0.05).
+    in1 carries only D1 vehicles, so the bottleneck on o2 must not block in1.
+    """
+    W = World(tmax=3000, deltat=10, print_mode=0, route_choice="duo")
+    for n in ["O1", "O2", "X", "D1", "D2"]:
+        W.addNode(n, 0, 0)
+    W.addLink("in1", "O1", "X", length=1000, free_flow_speed=10, backward_wave_speed=5, capacity=0.5)
+    W.addLink("in2", "O2", "X", length=1000, free_flow_speed=10, backward_wave_speed=5, capacity=0.5)
+    W.addLink("o1", "X", "D1", length=1000, free_flow_speed=10, backward_wave_speed=5, capacity=0.5)
+    W.addLink("o2", "X", "D2", length=1000, free_flow_speed=10, backward_wave_speed=5, capacity=0.05)
+    W.adddemand("O1", "D1", 0, 1000, 0.3)
+    W.adddemand("O2", "D2", 0, 1000, 0.3)
+    return W
+
+
+def _build_origin_bottleneck():
+    """Origin whose outlink capacity (0.5) is below the demand rate (1.0)."""
+    W = World(tmax=2000, deltat=10, print_mode=0, route_choice="duo")
+    for n in ["O", "M", "D"]:
+        W.addNode(n, 0, 0)
+    W.addLink("a", "O", "M", length=1000, free_flow_speed=20, backward_wave_speed=5, capacity=0.5)
+    W.addLink("b", "M", "D", length=1000, free_flow_speed=20, backward_wave_speed=5, capacity=0.2)
+    W.adddemand("O", "D", 0, 1000, 1.0)
+    return W
+
+
+def _inverse_cumulative(cum_agg, value):
+    """Fractional timestep tau with cum_agg(tau) = value (piecewise linear inverse)."""
+    cum_agg = np.asarray(cum_agg)
+    j = int(np.searchsorted(cum_agg, value, side="right")) - 1
+    j = min(max(j, 0), len(cum_agg) - 2)
+    lo, hi = cum_agg[j], cum_agg[j + 1]
+    frac = (value - lo) / (hi - lo) if hi > lo else 0.0
+    return j + min(max(frac, 0.0), 1.0)
+
+
+class TestFIFO:
+    """Per-destination departures follow N_D^s(t) = N_U^s(tau(t)) with N_U(tau(t)) = N_D(t)."""
+
+    def test_time_separated_destinations_depart_in_order(self):
+        W = _build_time_separated()
+        W.exec_simulation()
+        link = W.get_link("in")
+        cd1 = np.asarray(link.cum_departure_d["D1"])
+        cd2 = np.asarray(link.cum_departure_d["D2"])
+        # Every D2 departure happens after all 180 D1 vehicles have departed
+        assert np.all(cd1[cd2 > 1e-6] > 180 - 1e-6)
+        assert cd2[-1] > 100
+        assert abs(W.get_node("D1").absorbed_count - 180) < 1e-6
+        assert abs(W.get_node("D2").absorbed_count - 180) < 1e-6
+
+    @pytest.mark.parametrize("route_choice", ["duo", "duo_logit"])
+    def test_species_conservation(self, route_choice):
+        """N_D^s <= N_U^s for every destination, and per-destination curves sum to the aggregate."""
+        W = _build_kuwahara(route_choice)
+        W.exec_simulation()
+        for link in W.LINKS:
+            ca = np.array([link.cum_arrival_d[d] for d in W._destinations])
+            cd = np.array([link.cum_departure_d[d] for d in W._destinations])
+            assert np.all(cd <= ca + 1e-6)
+            np.testing.assert_allclose(ca.sum(axis=0), link.cum_arrival, atol=1e-6)
+            np.testing.assert_allclose(cd.sum(axis=0), link.cum_departure, atol=1e-6)
+
+    @pytest.mark.parametrize("route_choice", ["duo", "duo_logit"])
+    def test_fifo_invariant(self, route_choice):
+        """Departure composition equals the arrival composition at the matching cumulative rank."""
+        W = _build_kuwahara(route_choice)
+        W.exec_simulation()
+        for link in W.LINKS:
+            ca = np.array([link.cum_arrival_d[d] for d in W._destinations])
+            for t in range(0, W.TSIZE + 1, max(1, W.TSIZE // 50)):
+                tau = _inverse_cumulative(link.cum_arrival, link.cum_departure[t])
+                j = int(tau)
+                frac = tau - j
+                expected = ca[:, j] * (1 - frac) + ca[:, min(j + 1, W.TSIZE)] * frac
+                actual = np.array([link.cum_departure_d[d][t] for d in W._destinations])
+                np.testing.assert_allclose(actual, expected, atol=1e-6)
+
+    def test_general_node_per_inlink_turning_fractions(self):
+        W = _build_general_node()
+        W.exec_simulation()
+        assert abs(W.get_node("D1").absorbed_count - 300) < 1e-6
+        assert W.get_node("D2").absorbed_count < 200
+
+    def test_origin_supply_respected(self):
+        W = _build_origin_bottleneck()
+        W.exec_simulation()
+        a = W.get_link("a")
+        inflow = np.diff(np.asarray(a.cum_arrival)) / W.DELTAT
+        assert inflow.max() <= 0.5 + 1e-9
+        on_links = sum(l.cum_arrival[-1] - l.cum_departure[-1] for l in W.LINKS)
+        total = W.get_node("O").demand_queue + on_links + W.get_node("D").absorbed_count
+        assert abs(total - 1000) < 1e-6
+
+
+# ================================================================
 # JAX DUO logit tests
 # ================================================================
 
@@ -188,6 +314,287 @@ try:
     HAS_JAX = True
 except (ImportError, RuntimeError):
     HAS_JAX = False
+
+
+class TestCoarse:
+    """node_fifo="coarse": lightweight proportional allocation (no FIFO guarantee)."""
+
+    def test_invalid_option(self):
+        with pytest.raises(ValueError):
+            World(tmax=100, print_mode=0, route_choice="duo", node_fifo="loose")
+
+    @pytest.mark.parametrize("route_choice", ["aon", "duo", "duo_multipoint", "duo_logit"])
+    def test_runs_and_conserves(self, route_choice):
+        W = _build_kuwahara(route_choice, node_fifo="coarse")
+        W.exec_simulation()
+        W.analyzer.basic_analysis()
+        for link in W.LINKS:
+            ca = np.array([link.cum_arrival_d[d] for d in W._destinations])
+            cd = np.array([link.cum_departure_d[d] for d in W._destinations])
+            np.testing.assert_allclose(ca.sum(axis=0), link.cum_arrival, atol=1e-6)
+            np.testing.assert_allclose(cd.sum(axis=0), link.cum_departure, atol=1e-6)
+        remaining = sum(n.demand_queue for n in W.NODES) + \
+            sum(l.cum_arrival[-1] - l.cum_departure[-1] for l in W.LINKS)
+        assert abs(W.analyzer.trip_completed + remaining - W.analyzer.trip_all) < 1e-3
+
+    def test_coarse_departs_out_of_order(self):
+        """In the time-separated scenario, coarse lets D2 vehicles leave before all D1 vehicles."""
+        W = _build_time_separated(node_fifo="coarse")
+        W.exec_simulation()
+        link = W.get_link("in")
+        cd1 = np.asarray(link.cum_departure_d["D1"])
+        cd2 = np.asarray(link.cum_departure_d["D2"])
+        assert np.any((cd2 > 1e-6) & (cd1 < 180 - 1.0))
+
+    def test_strict_is_default(self):
+        W = World(tmax=100, print_mode=0, route_choice="duo")
+        assert W.NODE_FIFO == "strict"
+
+
+def _build_grid_logit():
+    W = _build_grid()
+    W.ROUTE_CHOICE = "duo_logit"
+    W.LOGIT_TEMPERATURE = 60.0
+    return W
+
+
+_EQUIV_SCENARIOS = {
+    "kuwahara_duo": lambda: _build_kuwahara("duo"),
+    "kuwahara_logit": lambda: _build_kuwahara("duo_logit"),
+    "time_separated": _build_time_separated,
+    "general_node": _build_general_node,
+    "origin_bottleneck": _build_origin_bottleneck,
+    "grid_duo": lambda: _build_grid(),  # defined below
+    "grid_logit": _build_grid_logit,
+}
+
+
+@pytest.mark.skipif(not HAS_JAX, reason="JAX not available")
+class TestFIFOJAX:
+    """JAX DUO reproduces the Python reference implementation (same algorithm, float32)."""
+
+    @pytest.mark.parametrize("scenario", list(_EQUIV_SCENARIOS))
+    @pytest.mark.parametrize("differentiable", [True, False])
+    def test_matches_python(self, scenario, differentiable):
+        build = _EQUIV_SCENARIOS[scenario]
+        W = build()
+        W.exec_simulation()
+        ca_py = np.array([l.cum_arrival for l in W.LINKS])
+        cd_py = np.array([l.cum_departure for l in W.LINKS])
+        cad_py = np.array([[l.cum_arrival_d[d] for d in W._destinations] for l in W.LINKS])
+        cdd_py = np.array([[l.cum_departure_d[d] for d in W._destinations] for l in W.LINKS])
+        absorbed_py = np.array([n.absorbed_count for n in W.NODES])
+
+        params, config = world_to_jax(build())
+        state = simulate_duo(params, config, differentiable=differentiable)
+        tol = 1e-5 * ca_py.max()
+        np.testing.assert_allclose(np.asarray(state.cum_arrival), ca_py, atol=tol)
+        np.testing.assert_allclose(np.asarray(state.cum_departure), cd_py, atol=tol)
+        np.testing.assert_allclose(np.asarray(state.cum_arrival_d), cad_py, atol=tol)
+        np.testing.assert_allclose(np.asarray(state.cum_departure_d), cdd_py, atol=tol)
+        np.testing.assert_allclose(np.asarray(state.absorbed_count), absorbed_py, atol=tol)
+
+    def test_grad_finite(self):
+        params, config = world_to_jax(_build_time_separated())
+        g = jax.grad(lambda p: total_travel_time(simulate_duo(p, config), config))(params)
+        assert jnp.all(jnp.isfinite(g.od_demand_rate))
+        assert jnp.all(jnp.isfinite(g.q_star))
+        assert float(jnp.abs(g.q_star).max()) > 0.0
+
+    def test_lookup_derivative_follows_rank(self):
+        """The derivatives of the FIFO lookup sum over destinations to the derivative of the rank.
+
+        The rank is on a grid point, at the end of the written range and on a plateau, where the clip, the endpoint branch and the flat-segment branch of the value would give other derivatives.
+        On the plateau the derivative follows the composition of the last arrivals.
+        """
+        from unsim.unsim import _fifo_lookup
+        from unsim.unsim_diff import _fifo_lookup_batch
+        # increments (step, row, destination); rows 0 and 1 share a curve, row 2 is flat from step 3 on
+        inc = np.zeros((7, 3, 2), dtype=np.float32)
+        inc[:, 0] = inc[:, 1] = [[1, 0], [1, 0], [0, 1], [0, 1], [1, 1], [0, 2], [1, 0]]
+        inc[:3, 2] = [[1, 0], [0, 1], [0, 2]]
+        cum_d = np.concatenate([np.zeros((1, 3, 2), np.float32), np.cumsum(inc, axis=0)])  # (T+1, n, k)
+        cum_agg = cum_d.sum(axis=2).T
+        t_max = 6
+        values = cum_agg[[0, 1, 2], [3, t_max, t_max]]
+        rng = np.random.default_rng(0)
+        t_d = rng.normal(size=cum_d.shape).astype(np.float32)
+        t_d[0] = 0.0
+        t_v = rng.normal(size=3).astype(np.float32)
+        y, ty = jax.jvp(lambda a, d, v: _fifo_lookup_batch(a, d, v, t_max),
+                        (jnp.asarray(cum_agg), jnp.asarray(cum_d), jnp.asarray(values)),
+                        (jnp.asarray(t_d.sum(axis=2).T), jnp.asarray(t_d), jnp.asarray(t_v)))
+        for i in range(3):
+            ref = _fifo_lookup(cum_agg[i].astype(np.float64), cum_d[:, i, :].T.astype(np.float64), float(values[i]), t_max)
+            np.testing.assert_allclose(np.asarray(y[i]), ref, atol=1e-6)
+        np.testing.assert_allclose(np.asarray(ty.sum(axis=1)), t_v, atol=1e-5)
+        # plateau row: lo is at step t_max - 1, and the last arrivals (step 2 to 3) are all of destination 2
+        t_lo = t_d[t_max - 1, 2]
+        np.testing.assert_allclose(np.asarray(ty[2]), t_lo + np.array([0.0, 1.0]) * (t_v[2] - t_lo.sum()), atol=1e-5)
+
+    def test_cohort_lookup_takes_segment_before_grid_value(self):
+        """For the sending cohort (follow_rank=False) a rank on a grid value takes the derivative of the segment before it.
+
+        The value is the same as with the segment after it.
+        """
+        from unsim.unsim_diff import _fifo_lookup_batch
+        inc = np.array([[1, 0], [1, 0], [0, 1], [0, 1]], dtype=np.float32)  # two steps of destination 1, then two of destination 2
+        cum_d = np.concatenate([np.zeros((1, 2), np.float32), np.cumsum(inc, axis=0)])[:, None, :]  # (T+1, n, k)
+        cum_agg = cum_d.sum(axis=2).T
+        y, ty = jax.jvp(lambda v: _fifo_lookup_batch(jnp.asarray(cum_agg), jnp.asarray(cum_d), v, 4, follow_rank=False),
+                        (jnp.array([2.0]),), (jnp.array([1.0]),))
+        np.testing.assert_allclose(np.asarray(y), [[2.0, 0.0]])
+        np.testing.assert_allclose(np.asarray(ty), [[1.0, 0.0]])
+
+    def test_cohort_boundary_derivative_within_one_sided(self):
+        """d TTT / d q* of link "in" (time-separated scenario) lies between the float64 one-sided differences.
+
+        At t = 2050 s the sending cohort of "in" ends exactly at the last D1 vehicle (rank 180, a grid value of the arrival curve).
+        Taking the composition after it (D2 vehicles) gave -63179, outside [D-, D+] = [-62895.5, 81.3].
+        """
+        def ttt_np(dq):
+            W = World(tmax=4000, deltat=10, print_mode=0, route_choice="duo", node_fifo="strict")
+            for n in ["O", "M", "D1", "D2"]:
+                W.addNode(n, 0, 0)
+            q = 0.5 + dq  # kappa = 0.15 fixed, w derived as in Params
+            W.addLink("in", "O", "M", length=3000, free_flow_speed=10, backward_wave_speed=10 * q / (1.5 - q), capacity=q)
+            W.addLink("o1", "M", "D1", length=1000, free_flow_speed=10, backward_wave_speed=5, capacity=0.1)
+            W.addLink("o2", "M", "D2", length=1000, free_flow_speed=10, backward_wave_speed=5, capacity=0.5)
+            W.adddemand("O", "D1", 0, 600, 0.3)
+            W.adddemand("O", "D2", 600, 1200, 0.3)
+            W.exec_simulation()
+            ts = W.TSIZE
+            v = sum(np.sum(np.asarray(l.cum_arrival, np.float64)[:ts] - np.asarray(l.cum_departure, np.float64)[:ts]) for l in W.LINKS)
+            v += sum(np.sum(np.asarray(n.demand_queue_history, np.float64)[:ts]) for n in W.NODES)
+            return v * W.DELTAT
+
+        eps = 1e-6
+        f0 = ttt_np(0.0)
+        d_plus, d_minus = (ttt_np(eps) - f0) / eps, (f0 - ttt_np(-eps)) / eps
+        params, config = world_to_jax(_build_time_separated())
+        g = float(jax.grad(lambda p: total_travel_time(simulate_duo(p, config), config))(params).q_star[0])
+        tol = 1e-4 * max(abs(d_plus), abs(d_minus)) + 0.5
+        assert min(d_plus, d_minus) - tol <= g <= max(d_plus, d_minus) + tol, (g, d_plus, d_minus)
+
+
+def _build_general_node_coarse():
+    W = _build_general_node()
+    W.NODE_FIFO = "coarse"
+    return W
+
+
+def _build_origin_bottleneck_coarse():
+    W = _build_origin_bottleneck()
+    W.NODE_FIFO = "coarse"
+    return W
+
+
+def _build_merge(node_fifo):
+    """Y-shaped merge whose congestion spills back into the vertical queue of orig2, which empties after its demand ends.
+
+    orig1 -> merge (link1), orig2 -> merge (link2), merge -> dest (link3).
+
+    Parameters
+    ----------
+    node_fifo : str
+        "strict" or "coarse".
+
+    Returns
+    -------
+    World
+    """
+    W = World(tmax=2000, deltat=5, print_mode=0, route_choice="duo", node_fifo=node_fifo)
+    for n, x, y in (("orig1", 0, 0), ("orig2", 0, 2), ("merge", 1, 1), ("dest", 2, 1)):
+        W.addNode(n, x, y)
+    for name, a, b in (("link1", "orig1", "merge"), ("link2", "orig2", "merge"), ("link3", "merge", "dest")):
+        W.addLink(name, a, b, length=1000, free_flow_speed=20, backward_wave_speed=5, capacity=0.8)
+    W.adddemand("orig1", "dest", 0, 1000, 0.45)
+    W.adddemand("orig2", "dest", 400, 1000, 0.6)
+    return W
+
+
+@pytest.mark.skipif(not HAS_JAX, reason="JAX not available")
+class TestCoarseJAX:
+    """JAX node_fifo="coarse" reproduces the Python coarse model."""
+
+    # The time-separated scenario is excluded: the coarse model overshoots the downstream
+    # supply there and float32/float64 differences grow exponentially.
+    @pytest.mark.parametrize("build", [
+        lambda: _build_kuwahara("duo", node_fifo="coarse"),
+        lambda: _build_kuwahara("duo_multipoint", node_fifo="coarse"),
+        lambda: _build_kuwahara("duo_logit", node_fifo="coarse"),
+        _build_general_node_coarse,
+        _build_origin_bottleneck_coarse,
+    ], ids=["kuwahara_duo", "kuwahara_multipoint", "kuwahara_logit", "general_node", "origin_bottleneck"])
+    @pytest.mark.parametrize("differentiable", [True, False])
+    def test_matches_python(self, build, differentiable):
+        W = build()
+        W.exec_simulation()
+        ca_py = np.array([l.cum_arrival for l in W.LINKS])
+        cd_py = np.array([l.cum_departure for l in W.LINKS])
+        cdd_py = np.array([[l.cum_departure_d[d] for d in W._destinations] for l in W.LINKS])
+        params, config = world_to_jax(build())
+        assert config.node_fifo == "coarse"
+        state = simulate_duo(params, config, differentiable=differentiable)
+        tol = 1e-5 * ca_py.max()
+        np.testing.assert_allclose(np.asarray(state.cum_arrival), ca_py, atol=tol)
+        np.testing.assert_allclose(np.asarray(state.cum_departure), cd_py, atol=tol)
+        np.testing.assert_allclose(np.asarray(state.cum_departure_d), cdd_py, atol=tol)
+
+    def test_grad_finite(self):
+        params, config = world_to_jax(_build_kuwahara("duo_logit", node_fifo="coarse"))
+        g = jax.grad(lambda p: total_travel_time(simulate_duo(p, config), config))(params)
+        assert jnp.all(jnp.isfinite(g.od_demand_rate))
+        assert float(jnp.abs(g.q_star).max()) > 0.0
+
+    @pytest.mark.parametrize("node_fifo", ["strict", "coarse"])
+    def test_origin_queue_end_conserves_tangent(self, node_fifo):
+        """Vehicles added to orig2's demand all enter link2 in the linearization (forward and reverse mode).
+
+        The vertical queue of orig2 empties in a step without demand.
+        There the coarse composition share is 0 (0/0), which used to keep the derivative of the queued vehicles in the queue (derivative 0, not 600).
+        """
+        params, config = world_to_jax(_build_merge(node_fifo))
+
+        def entered(x):
+            od = params.od_demand_rate.at[1, 0, 80:200].add(x)  # orig2 -> dest, t in [400, 1000)
+            return simulate_duo(params._replace(od_demand_rate=od), config).cum_arrival[1, -1]
+
+        added = config.deltat * 120
+        _, dn = jax.jvp(entered, (0.0,), (1.0,))
+        assert abs(float(dn) - added) < 1e-3 * added
+        assert abs(float(jax.grad(entered)(0.0)) - added) < 1e-3 * added
+
+    @pytest.mark.parametrize("node_fifo", ["strict", "coarse"])
+    @pytest.mark.parametrize("differentiable", [True, False])
+    def test_aon_matches_python(self, node_fifo, differentiable):
+        """Python "aon" (routes frozen at free flow) reproduces simulate_aon."""
+        from unsim.unsim_diff import simulate_aon
+        W = _build_kuwahara("aon", node_fifo=node_fifo)
+        W.exec_simulation()
+        ca_py = np.array([l.cum_arrival for l in W.LINKS])
+        cd_py = np.array([l.cum_departure for l in W.LINKS])
+        params, config = world_to_jax(_build_kuwahara("aon", node_fifo=node_fifo))
+        state = simulate_aon(params, config, differentiable=differentiable)
+        tol = 1e-5 * ca_py.max()
+        np.testing.assert_allclose(np.asarray(state.cum_arrival), ca_py, atol=tol)
+        np.testing.assert_allclose(np.asarray(state.cum_departure), cd_py, atol=tol)
+
+    @pytest.mark.parametrize("differentiable", [True, False])
+    def test_aon_coarse_runs_and_conserves(self, differentiable):
+        """simulate_aon honours node_fifo="coarse" on both the differentiable and the forward-only path."""
+        from unsim.unsim_diff import simulate_aon
+        params, config = world_to_jax(_build_kuwahara("aon", node_fifo="coarse"))
+        assert config.node_fifo == "coarse"
+        state = simulate_aon(params, config, differentiable=differentiable)
+        ca = np.asarray(state.cum_arrival)
+        cd = np.asarray(state.cum_departure)
+        assert np.all(np.isfinite(ca)) and np.all(np.isfinite(cd))
+        assert np.all(cd <= ca + 1e-3 * ca.max())
+        assert ca.max() > 0.0
+        if differentiable:
+            cdd = np.asarray(state.cum_departure_d)
+            np.testing.assert_allclose(cdd.sum(axis=1), cd, atol=1e-5 * ca.max())
 
 
 @pytest.mark.skipif(not HAS_JAX, reason="JAX not available")
