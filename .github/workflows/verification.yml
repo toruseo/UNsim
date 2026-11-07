@@ -22,8 +22,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install numpy pandas matplotlib pillow pytest jax[cpu]
+          pip install numpy pandas matplotlib pillow pytest pytest-xdist jax[cpu]
 
       - name: Run tests
-        run: |
-          python -m pytest tests/ -v
+        run: python -m pytest -n auto tests/ -v
