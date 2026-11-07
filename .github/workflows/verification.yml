@@ -11,6 +11,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test-file:
+          - test_api.py
+          - test_checkpoint.py
+          - test_deltat.py
+          - test_diff.py
+          - test_duo.py
+          - test_route_bias.py
+          - test_travel_time_soft.py
+          - test_verification_node.py
+          - test_verification_straight_road.py
+          - test_visualization.py
 
     steps:
       - uses: actions/checkout@v7
@@ -24,6 +38,5 @@ jobs:
         run: |
           pip install numpy pandas matplotlib pillow pytest jax[cpu]
 
-      - name: Run tests
-        run: |
-          python -m pytest tests/ -v
+      - name: Run ${{ matrix.test-file }}
+        run: python -m pytest "tests/${{ matrix.test-file }}" -v
